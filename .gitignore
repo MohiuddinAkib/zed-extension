@@ -1,0 +1,8 @@
+# Rust build output
+/target/
+
+# Generated local Zed extension artifact
+/extension.wasm
+
+# macOS
+.DS_Store
