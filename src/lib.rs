@@ -1,4 +1,4 @@
-use zed_extension_api::{self as zed, serde_json, settings::LspSettings, LanguageServerId, Result};
+use zed_extension_api::{self as zed, settings::LspSettings, LanguageServerId, Result};
 
 const LANGUAGE_SERVER_ID: &str = "laravel";
 
@@ -35,20 +35,6 @@ impl zed::Extension for LaravelExtension {
             args: binary.arguments.unwrap_or_default(),
             env: worktree.shell_env(),
         })
-    }
-
-    fn language_server_initialization_options(
-        &mut self,
-        language_server_id: &LanguageServerId,
-        _worktree: &zed::Worktree,
-    ) -> Result<Option<serde_json::Value>> {
-        if language_server_id.as_ref() != LANGUAGE_SERVER_ID {
-            return Err(format!("unknown language server: {language_server_id}"));
-        }
-
-        Ok(Some(serde_json::json!({
-            "definitionProvider": true
-        })))
     }
 }
 
