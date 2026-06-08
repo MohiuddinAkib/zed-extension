@@ -12,7 +12,19 @@ In Zed, run `zed: install dev extension` and select:
 
 ## Configuration
 
-Configure the server path in Zed settings:
+No configuration is required by default. The extension automatically checks the
+latest `laravel/lsp` release, downloads the matching standalone Laravel LSP
+server binary, and starts it for PHP and Blade files.
+
+The extension currently supports the standalone binaries published by
+`laravel/lsp` for:
+
+- macOS arm64 and x64
+- Linux arm64 and x64
+- Windows x64
+
+To use a local or custom Laravel LSP server instead, configure the server path in
+Zed settings:
 
 ```json
 {
@@ -31,6 +43,8 @@ Configure the server path in Zed settings:
 
 - Zed PHP language support for PHP files.
 - The Blade extension for Blade files.
-- The configured Laravel LSP server path must be executable.
+- PHP and Composer available to the Laravel project as required by Laravel LSP.
+- If you configure a custom Laravel LSP server path, it must be executable.
 
-This first version is intentionally local-only. It does not download the server binary or bundle PHP/Blade grammars.
+Downloaded Laravel LSP binaries are managed by this extension. Old managed
+binaries are removed automatically when a newer release is installed.
