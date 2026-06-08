@@ -39,6 +39,23 @@ Zed settings:
 }
 ```
 
+To pass initialization options directly to the Laravel LSP server, configure
+`lsp.laravel.initialization_options`:
+
+```json
+{
+  "lsp": {
+    "laravel": {
+      "initialization_options": {
+        "routeCompletion": false,
+        "phpEnvironment": "sail",
+        "phpCommand": ["./vendor/bin/sail", "php"]
+      }
+    }
+  }
+}
+```
+
 ## Requirements
 
 - Zed PHP language support for PHP files.

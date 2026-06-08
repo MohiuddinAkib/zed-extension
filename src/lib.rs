@@ -55,6 +55,18 @@ impl zed::Extension for LaravelExtension {
             env: worktree.shell_env(),
         })
     }
+
+    fn language_server_initialization_options(
+        &mut self,
+        language_server_id: &LanguageServerId,
+        worktree: &zed::Worktree,
+    ) -> Result<Option<zed::serde_json::Value>> {
+        if language_server_id.as_ref() != LANGUAGE_SERVER_ID {
+            return Err(format!("unknown language server: {language_server_id}"));
+        }
+
+        Ok(LspSettings::for_worktree(LANGUAGE_SERVER_ID, worktree)?.initialization_options)
+    }
 }
 
 fn install_or_find_laravel_lsp(language_server_id: &LanguageServerId) -> Result<String> {
