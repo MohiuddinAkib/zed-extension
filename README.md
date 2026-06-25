@@ -13,8 +13,11 @@ In Zed, run `zed: install dev extension` and select:
 ## Configuration
 
 No configuration is required by default. The extension automatically checks the
-latest `laravel/lsp` release, downloads the matching standalone Laravel LSP
-server binary, and starts it for PHP and Blade files.
+latest `laravel/lsp` release at most once every two hours, downloads the
+matching standalone Laravel LSP server binary, and starts it for PHP and Blade
+files. If no managed binary has been installed yet, the extension checks for a
+release immediately. If an update check fails and a managed binary is already
+installed, the extension continues using the installed binary.
 
 The extension currently supports the standalone binaries published by
 `laravel/lsp` for:
