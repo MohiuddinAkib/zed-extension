@@ -4,5 +4,8 @@
 # Generated local Zed extension artifact
 /extension.wasm
 
+# Managed Laravel LSP binaries
+/laravel-lsp/
+
 # macOS
 .DS_Store
