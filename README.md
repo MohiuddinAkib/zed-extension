@@ -59,6 +59,37 @@ To pass initialization options directly to the Laravel LSP server, configure
 }
 ```
 
+## Force-updating the Laravel LSP
+
+The extension checks for Laravel LSP updates at most once every two hours. To
+force an update check without waiting, delete the update-check timestamp file
+from the extension's work directory:
+
+- macOS:
+
+  ```sh
+  rm -f "$HOME/Library/Application Support/Zed/extensions/work/laravel/laravel-lsp/.last-update-check"
+  ```
+
+- Linux:
+
+  ```sh
+  rm -f "$HOME/.local/share/zed/extensions/work/laravel/laravel-lsp/.last-update-check"
+  ```
+
+- Windows (PowerShell):
+
+  ```powershell
+  Remove-Item "$env:LOCALAPPDATA\Zed\extensions\work\laravel\laravel-lsp\.last-update-check" -ErrorAction Ignore
+  ```
+
+Then run `editor: restart language server` from the command palette (or restart
+Zed). The extension will check the latest `laravel/lsp` release immediately and
+download it if a newer version is available.
+
+To force a full re-download instead, delete the entire `laravel-lsp` directory
+at the same location before restarting the language server.
+
 ## Requirements
 
 - Zed PHP language support for PHP files.
