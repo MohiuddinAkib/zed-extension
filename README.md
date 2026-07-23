@@ -1,97 +1,51 @@
-# Laravel Zed Extension
-
-- [Introduction](#introduction)
-- [Installation](#installation)
-    - [Requirements](#requirements)
-- [Configuration](#configuration)
-    - [Automatic LSP Downloads](#automatic-lsp-downloads)
-    - [Custom Server Binary](#custom-server-binary)
-    - [Initialization Options](#initialization-options)
-- [Force-Updating the Laravel LSP](#force-updating-the-laravel-lsp)
-
 ## Introduction
 
 The Laravel Zed extension integrates the [Laravel LSP](https://github.com/laravel/lsp) server with Zed, providing completions, hover information, diagnostics, links, and code actions for your PHP and Blade files.
 
+## LSP Documentation
+
+Documentation for Laravel LSP can be found in the [Laravel LSP repository](https://github.com/laravel/lsp).
+
 ## Installation
 
-To install the extension, run `zed: install dev extension` from the Zed command palette and select the extension's directory:
-
-```sh
-/path/to/zed-extension
-```
-
-### Requirements
-
-- Zed PHP language support for PHP files.
-- The Blade extension for Blade files.
-- PHP and Composer available to your Laravel project.
+Open the Extensions page from the Zed command palette with `zed: extensions`, search for "Laravel", and select **Install**.
 
 ## Configuration
 
-### Automatic LSP Downloads
+No configuration is required by default.
 
-No configuration is required by default. The extension automatically downloads the latest standalone Laravel LSP server binary and starts it for PHP and Blade files. The following platforms are supported:
-
-- macOS arm64 and x64
-- Linux arm64 and x64
-- Windows x64
-
-### Custom Server Binary
-
-To use a local or custom Laravel LSP server, you may configure the server path in your Zed settings:
-
-```json
-{
-  "lsp": {
-    "laravel": {
-      "binary": {
-        "path": "/path/to/lsp/server",
-        "arguments": []
-      }
-    }
-  }
-}
-```
-
-### Initialization Options
-
-To pass initialization options directly to the Laravel LSP server, you may configure `lsp.laravel.initialization_options`:
+To pass initialization options directly to the Laravel LSP server, configure `lsp.laravel.initialization_options` in your Zed settings:
 
 ```json
 {
   "lsp": {
     "laravel": {
       "initialization_options": {
-        "routeCompletion": false,
-        "phpEnvironment": "sail",
-        "phpCommand": ["./vendor/bin/sail", "php"]
+        "phpEnvironment": "sail"
       }
     }
   }
 }
 ```
 
-## Force-Updating the Laravel LSP
+For the full list of available configuration options, see the [Laravel LSP repository](https://github.com/laravel/lsp).
 
-The extension checks for Laravel LSP updates at most once every two hours. To force an update check without waiting, delete the update-check timestamp file from the extension's work directory:
+## Updates
 
-- macOS:
+The extension checks for Laravel LSP updates at most once every two hours. To force an update check without waiting, delete the `.last-update-check` file from the `laravel-lsp` directory in the extension's work directory, then run `editor: restart language server` from the command palette.
 
-  ```sh
-  rm -f "$HOME/Library/Application Support/Zed/extensions/work/laravel/laravel-lsp/.last-update-check"
-  ```
+## Contributing
 
-- Linux:
+Thank you for considering contributing to the Laravel Zed extension! The contribution guide can be found in the [Laravel documentation](https://laravel.com/docs/contributions).
 
-  ```sh
-  rm -f "$HOME/.local/share/zed/extensions/work/laravel/laravel-lsp/.last-update-check"
-  ```
+## Code of Conduct
 
-- Windows (PowerShell):
+In order to ensure that the Laravel community is welcoming to all, please review and abide by the [Code of Conduct](https://laravel.com/docs/contributions#code-of-conduct).
 
-  ```powershell
-  Remove-Item "$env:LOCALAPPDATA\Zed\extensions\work\laravel\laravel-lsp\.last-update-check" -ErrorAction Ignore
-  ```
+## Security Vulnerabilities
 
-Then, run `editor: restart language server` from the command palette. The extension will immediately check for the latest `laravel/lsp` release and download it if a newer version is available.
+Please review [our security policy](https://github.com/laravel/zed-extension/security/policy) on how to report security vulnerabilities.
+
+## License
+
+The Laravel Zed extension is open-sourced software licensed under the [MIT license](https://opensource.org/license/mit).
