@@ -32,7 +32,13 @@ For the full list of available configuration options, see the [Laravel LSP repos
 
 ## Updates
 
-The extension checks for Laravel LSP updates at most once every two hours. To force an update check without waiting, delete the `.last-update-check` file from the `laravel-lsp` directory in the extension's work directory, then run `editor: restart language server` from the command palette.
+The extension checks for Laravel LSP updates at most once every two hours. On macOS, you can force an update check without waiting by removing the `.last-update-check` file:
+
+```bash
+rm "$HOME/Library/Application Support/Zed/extensions/work/laravel/laravel-lsp/.last-update-check"
+```
+
+Then run `editor: restart language server` from the command palette. This forces an update check, not necessarily a download. The extension downloads the latest release only when its binary is not already installed. This update mechanism is bypassed when a custom LSP binary is configured.
 
 ## Contributing
 
