@@ -1,10 +1,10 @@
 id = "laravel"
 name = "Laravel"
 description = "Laravel LSP support."
-version = "0.1.0"
+version = "0.7.0"
 schema_version = 1
 authors = ["Laravel"]
-repository = "https://github.com/laravel/vs-code-extension"
+repository = "https://github.com/laravel/zed-extension"
 
 [language_servers.laravel]
 name = "Laravel LSP"
