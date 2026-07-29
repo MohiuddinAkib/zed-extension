@@ -8,7 +8,7 @@ Documentation for Laravel LSP can be found in the [Laravel LSP repository](https
 
 ## Installation
 
-Open the Extensions page from the Zed command palette with `zed: extensions`, search for "Laravel", and select **Install**.
+Open the Extensions page from the Zed command palette with `zed: extensions`, search for **Laravel (Official)**, and select **Install**.
 
 ## Configuration
 
@@ -35,7 +35,7 @@ For the full list of available configuration options, see the [Laravel LSP repos
 The extension checks for Laravel LSP updates at most once every two hours. On macOS, you can force an update check without waiting by removing the `.last-update-check` file:
 
 ```bash
-rm "$HOME/Library/Application Support/Zed/extensions/work/laravel/laravel-lsp/.last-update-check"
+rm "$HOME/Library/Application Support/Zed/extensions/work/laravel-official/laravel-lsp/.last-update-check"
 ```
 
 Then run `editor: restart language server` from the command palette. This forces an update check, not necessarily a download. The extension downloads the latest release only when its binary is not already installed. This update mechanism is bypassed when a custom LSP binary is configured.

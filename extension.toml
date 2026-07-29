@@ -1,6 +1,6 @@
-id = "laravel"
-name = "Laravel"
-description = "Laravel LSP support."
+id = "laravel-official"
+name = "Laravel (Official)"
+description = "Official Laravel LSP integration."
 version = "0.7.0"
 schema_version = 1
 authors = ["Laravel"]
