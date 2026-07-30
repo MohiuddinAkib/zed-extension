@@ -1,7 +1,7 @@
 id = "laravel-official"
 name = "Laravel (Official)"
 description = "Official Laravel LSP integration."
-version = "0.7.0"
+version = "0.1.0"
 schema_version = 1
 authors = ["Laravel"]
 repository = "https://github.com/laravel/zed-extension"
