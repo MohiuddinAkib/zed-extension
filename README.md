@@ -1,13 +1,3 @@
-# NOTICE
-
-The extension is currently [pending review for inclusion in the Zed extensions marketplace](https://github.com/zed-industries/extensions/pull/6996).
-
-In the meantime, you can install it locally:
-
-1. Clone this repository.
-2. Ensure [Rust](https://rustup.rs/) is installed and available.
-3. In Zed, select `zed: install dev extension` from the command palette and choose the cloned repository.
-
 ## Introduction
 
 The Laravel Zed extension integrates the [Laravel LSP](https://github.com/laravel/lsp) server with Zed, providing completions, hover information, diagnostics, links, and code actions for your PHP and Blade files.
