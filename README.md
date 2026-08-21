@@ -30,6 +30,24 @@ To pass initialization options directly to the Laravel LSP server, configure `ls
 
 For the full list of available configuration options, see the [Laravel LSP repository](https://github.com/laravel/lsp).
 
+### Laravel Applications in Subdirectories
+
+With a Laravel LSP release that supports `basePath`, set it to the Laravel application's directory relative to the workspace root:
+
+```json
+{
+  "lsp": {
+    "laravel": {
+      "initialization_options": {
+        "basePath": "backend"
+      }
+    }
+  }
+}
+```
+
+The extension only starts Laravel LSP when it finds an `artisan` file at the workspace root or configured `basePath`. This prevents the server from being launched in PHP packages and non-Laravel applications.
+
 ## Updates
 
 The extension checks for Laravel LSP updates at most once every two hours. On macOS, you can force an update check without waiting by removing the `.last-update-check` file:

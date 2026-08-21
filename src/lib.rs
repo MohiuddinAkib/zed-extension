@@ -30,7 +30,15 @@ impl zed::Extension for LaravelExtension {
             return Err(format!("unknown language server: {language_server_id}"));
         }
 
-        if let Some(binary) = LspSettings::for_worktree(LANGUAGE_SERVER_ID, worktree)?.binary {
+        let settings = LspSettings::for_worktree(LANGUAGE_SERVER_ID, worktree)?;
+        let artisan_path = artisan_path(settings.initialization_options.as_ref());
+        if worktree.read_text_file(&artisan_path).is_err() {
+            return Err(format!(
+                "Laravel LSP was not started because {artisan_path} does not exist in the worktree"
+            ));
+        }
+
+        if let Some(binary) = settings.binary {
             if let Some(command) = binary.path {
                 return Ok(zed::Command {
                     command,
@@ -74,6 +82,22 @@ impl zed::Extension for LaravelExtension {
         }
 
         Ok(LspSettings::for_worktree(LANGUAGE_SERVER_ID, worktree)?.initialization_options)
+    }
+}
+
+fn artisan_path(initialization_options: Option<&zed::serde_json::Value>) -> String {
+    let base_path = initialization_options
+        .and_then(|options| options.get("basePath"))
+        .and_then(|base_path| base_path.as_str())
+        .unwrap_or_default()
+        .trim()
+        .replace('\\', "/");
+    let base_path = base_path.trim_matches('/');
+
+    if base_path.is_empty() || base_path == "." {
+        "artisan".to_string()
+    } else {
+        format!("{base_path}/artisan")
     }
 }
 
@@ -378,6 +402,35 @@ mod tests {
             Ordering::Greater
         );
         assert_eq!(compare_version_names("v2.0.0", "v10.0.0"), Ordering::Less);
+    }
+
+    #[test]
+    fn artisan_path_uses_the_worktree_root_by_default() {
+        assert_eq!(artisan_path(None), "artisan");
+        assert_eq!(
+            artisan_path(Some(&zed::serde_json::json!({"basePath": ""}))),
+            "artisan"
+        );
+        assert_eq!(
+            artisan_path(Some(&zed::serde_json::json!({"basePath": "."}))),
+            "artisan"
+        );
+    }
+
+    #[test]
+    fn artisan_path_uses_the_configured_laravel_base_path() {
+        assert_eq!(
+            artisan_path(Some(&zed::serde_json::json!({"basePath": "apps/api"}))),
+            "apps/api/artisan"
+        );
+        assert_eq!(
+            artisan_path(Some(&zed::serde_json::json!({"basePath": " /api/ "}))),
+            "api/artisan"
+        );
+        assert_eq!(
+            artisan_path(Some(&zed::serde_json::json!({"basePath": "apps\\api"}))),
+            "apps/api/artisan"
+        );
     }
 
     #[test]
