@@ -258,6 +258,29 @@ class BladeMemberCompletionProvider implements CompletionProvider
                 default => '4_',
             };
 
+            $labelDetails = [];
+            if ($isMethod) {
+                $paramSig = $member['paramSignature'] ?? null;
+                if ($paramSig === null && preg_match('/\((.*?)\)/', $detail, $mSig)) {
+                    $paramSig = '(' . $mSig[1] . ')';
+                }
+                $retType = $member['returnType'] ?? null;
+                if ($retType === null && str_contains($detail, '): ')) {
+                    $retType = trim(explode('): ', $detail)[1]);
+                }
+                if ($paramSig !== null) {
+                    $labelDetails['detail'] = $paramSig;
+                }
+                if ($retType !== null && $retType !== '') {
+                    $labelDetails['description'] = $retType;
+                }
+            } else {
+                $desc = $member['returnType'] ?? ($detail !== '' ? $detail : null);
+                if ($desc !== null) {
+                    $labelDetails['description'] = $desc;
+                }
+            }
+
             $item = [
                 'label' => $label,
                 'kind' => $kind,
@@ -269,6 +292,10 @@ class BladeMemberCompletionProvider implements CompletionProvider
                 ],
                 'sortText' => $sortPrefix . $name,
             ];
+
+            if (!empty($labelDetails)) {
+                $item['labelDetails'] = $labelDetails;
+            }
 
             if ($doc !== '') {
                 $item['documentation'] = [
@@ -745,6 +772,10 @@ class BladeMemberCompletionProvider implements CompletionProvider
 
                         $completions[] = [
                             'label' => $mName,
+                            'labelDetails' => [
+                                'detail' => $sig,
+                                'description' => $retType,
+                            ],
                             'kind' => 2, // Method
                             'detail' => "public static {$mName}{$sig}: {$retType}",
                             'insertTextFormat' => 2, // Snippet format
@@ -765,6 +796,9 @@ class BladeMemberCompletionProvider implements CompletionProvider
                     $seenMembers['class'] = true;
                     $completions[] = [
                         'label' => 'class',
+                        'labelDetails' => [
+                            'description' => "class-string<{$cleanTarget}>",
+                        ],
                         'kind' => 21, // Constant
                         'detail' => "class-string<{$cleanTarget}>",
                         'insertTextFormat' => 1,
@@ -789,6 +823,9 @@ class BladeMemberCompletionProvider implements CompletionProvider
 
                         $completions[] = [
                             'label' => $cName,
+                            'labelDetails' => [
+                                'description' => 'const',
+                            ],
                             'kind' => 21, // Constant
                             'detail' => "const {$cName}",
                             'insertTextFormat' => 1,
@@ -824,6 +861,10 @@ class BladeMemberCompletionProvider implements CompletionProvider
 
                         $completions[] = [
                             'label' => $dName,
+                            'labelDetails' => [
+                                'detail' => $sig,
+                                'description' => $dInfo['returnType'] ?? 'mixed',
+                            ],
                             'kind' => 2, // Method
                             'detail' => $sig,
                             'insertTextFormat' => 2, // Snippet format
@@ -861,6 +902,10 @@ class BladeMemberCompletionProvider implements CompletionProvider
 
                         $completions[] = [
                             'label' => $mName,
+                            'labelDetails' => [
+                                'detail' => $sig,
+                                'description' => $retType,
+                            ],
                             'kind' => 2, // Method
                             'detail' => "public {$mName}{$sig}: {$retType} (via {$cleanAccessor})",
                             'insertTextFormat' => 2, // Snippet format
@@ -894,6 +939,10 @@ class BladeMemberCompletionProvider implements CompletionProvider
 
                             $completions[] = [
                                 'label' => $dName,
+                                'labelDetails' => [
+                                    'detail' => $sig,
+                                    'description' => $dInfo['returnType'] ?? 'mixed',
+                                ],
                                 'kind' => 2,
                                 'detail' => $sig,
                                 'insertTextFormat' => 2, // Snippet format

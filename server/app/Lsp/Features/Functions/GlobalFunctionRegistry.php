@@ -789,6 +789,9 @@ class GlobalFunctionRegistry
 
             $item = [
                 'label' => "{$name}()",
+                'labelDetails' => [
+                    'description' => $info['returnType'] ?? 'mixed',
+                ],
                 'kind' => 3, // Function
                 'detail' => $sig,
                 'documentation' => [

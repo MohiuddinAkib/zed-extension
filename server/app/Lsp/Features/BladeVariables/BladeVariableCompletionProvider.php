@@ -185,6 +185,9 @@ class BladeVariableCompletionProvider implements CompletionProvider
 
         return [
             'label' => $name,
+            'labelDetails' => [
+                'description' => $type,
+            ],
             'kind' => 6, // Variable
             'detail' => $detail,
             'documentation' => [
