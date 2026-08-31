@@ -213,17 +213,40 @@ class BladeMemberCompletionProvider implements CompletionProvider
                 continue;
             }
 
-            $kind = $member['kind']; // 10: Property, 5: Field, 2: Method
+            $kind = $member['kind']; // 10: Property, 5: Field, 2: Method, 21: Constant
             $detail = $member['detail'] ?? '';
             $doc = $member['documentation'] ?? '';
+            $isMethod = ($kind === 2 || ($member['isMethod'] ?? false));
 
             $label = $name;
             $newText = $name;
+            $insertTextFormat = 1; // PlainText by default
 
             if ($isArrayAccess) {
                 if ($quoteChar === '') {
                     $label = "'{$name}'";
                     $newText = "'{$name}'";
+                }
+            } elseif ($isMethod) {
+                $insertTextFormat = 2; // Snippet format
+                $snippet = $member['snippet'] ?? null;
+                if ($snippet !== null) {
+                    $newText = $snippet;
+                } else {
+                    $requiredParams = $member['requiredParams'] ?? null;
+                    if ($requiredParams !== null) {
+                        $newText = $requiredParams > 0 ? "{$name}(\${1})" : "{$name}()";
+                    } else {
+                        // Check if signature contains required parameters
+                        $hasRequiredParam = false;
+                        if (preg_match('/\(\s*([^)=,\s]+)/', $detail, $paramMatch)) {
+                            $firstParam = trim($paramMatch[1]);
+                            if ($firstParam !== '' && $firstParam !== 'void') {
+                                $hasRequiredParam = true;
+                            }
+                        }
+                        $newText = $hasRequiredParam ? "{$name}(\${1})" : "{$name}()";
+                    }
                 }
             }
 
@@ -231,13 +254,15 @@ class BladeMemberCompletionProvider implements CompletionProvider
                 10 => '0_', // Properties / Array keys
                 5 => '1_',  // Relations/Fields
                 2 => '2_',  // Methods
-                default => '3_',
+                21 => '3_', // Constants
+                default => '4_',
             };
 
             $item = [
                 'label' => $label,
                 'kind' => $kind,
                 'detail' => $detail,
+                'insertTextFormat' => $insertTextFormat,
                 'textEdit' => [
                     'range' => $range,
                     'newText' => $newText,
@@ -410,11 +435,22 @@ class BladeMemberCompletionProvider implements CompletionProvider
                     $docMethods = $this->docBlockParser->extractMethods($docComment);
                     foreach ($docMethods as $mName => $mInfo) {
                         if (!isset($members[$mName])) {
+                            $sig = $mInfo['signature'] ?? '()';
+                            $hasRequired = false;
+                            if (preg_match('/\(\s*([^)=,\s]+)/', $sig, $pm)) {
+                                $fp = trim($pm[1]);
+                                if ($fp !== '' && $fp !== 'void') {
+                                    $hasRequired = true;
+                                }
+                            }
                             $members[$mName] = [
                                 'name' => $mName,
                                 'kind' => 2,
-                                'detail' => $mInfo['signature'],
-                                'documentation' => "```php\npublic {$mInfo['name']}{$mInfo['signature']}\n```\n\n*Source:* `{$targetRef->getName()}`",
+                                'detail' => $sig,
+                                'documentation' => "```php\npublic {$mInfo['name']}{$sig}\n```\n\n*Source:* `{$targetRef->getName()}`",
+                                'isMethod' => true,
+                                'requiredParams' => $hasRequired ? 1 : 0,
+                                'snippet' => $hasRequired ? "{$mName}(\${1})" : "{$mName}()",
                             ];
                         }
                     }
@@ -478,12 +514,16 @@ class BladeMemberCompletionProvider implements CompletionProvider
                         }
                         $returnType = $method->hasReturnType() ? (string) $method->getReturnType() : 'mixed';
                         $paramSignature = '(' . implode(', ', $params) . ')';
+                        $numRequired = $method->getNumberOfRequiredParameters();
 
                         $members[$mName] = [
                             'name' => $mName,
                             'kind' => 2, // Method
                             'detail' => "{$paramSignature}: {$returnType}",
                             'documentation' => "```php\npublic function {$mName}{$paramSignature}: {$returnType}\n```",
+                            'isMethod' => true,
+                            'requiredParams' => $numRequired,
+                            'snippet' => $numRequired > 0 ? "{$mName}(\${1})" : "{$mName}()",
                         ];
                     }
                 }
@@ -700,20 +740,43 @@ class BladeMemberCompletionProvider implements CompletionProvider
 
                         $sig = $this->formatMethodSignature($method);
                         $retType = $method->hasReturnType() ? (string) $method->getReturnType() : 'mixed';
+                        $numReq = $method->getNumberOfRequiredParameters();
+                        $newText = $numReq > 0 ? "{$mName}(\${1})" : "{$mName}()";
+
                         $completions[] = [
                             'label' => $mName,
                             'kind' => 2, // Method
                             'detail' => "public static {$mName}{$sig}: {$retType}",
+                            'insertTextFormat' => 2, // Snippet format
                             'documentation' => [
                                 'kind' => 'markdown',
                                 'value' => "**{$cleanTarget}::{$mName}**\n\n```php\npublic static function {$mName}{$sig}: {$retType};\n```",
                             ],
                             'textEdit' => [
                                 'range' => $range,
-                                'newText' => $mName,
+                                'newText' => $newText,
                             ],
                         ];
                     }
+                }
+
+                // class pseudo-constant
+                if (!isset($seenMembers['class']) && ($memberPrefix === '' || str_starts_with('class', strtolower($memberPrefix)))) {
+                    $seenMembers['class'] = true;
+                    $completions[] = [
+                        'label' => 'class',
+                        'kind' => 21, // Constant
+                        'detail' => "class-string<{$cleanTarget}>",
+                        'insertTextFormat' => 1,
+                        'documentation' => [
+                            'kind' => 'markdown',
+                            'value' => "The fully qualified class name of `{$cleanTarget}`.",
+                        ],
+                        'textEdit' => [
+                            'range' => $range,
+                            'newText' => 'class',
+                        ],
+                    ];
                 }
 
                 // Constants / Enum cases
@@ -728,6 +791,7 @@ class BladeMemberCompletionProvider implements CompletionProvider
                             'label' => $cName,
                             'kind' => 21, // Constant
                             'detail' => "const {$cName}",
+                            'insertTextFormat' => 1,
                             'documentation' => [
                                 'kind' => 'markdown',
                                 'value' => "**{$cleanTarget}::{$cName}**",
@@ -748,17 +812,28 @@ class BladeMemberCompletionProvider implements CompletionProvider
                         if (isset($seenMembers[$dName])) continue;
                         $seenMembers[$dName] = true;
 
+                        $sig = $dInfo['signature'] ?? '()';
+                        $hasRequired = false;
+                        if (preg_match('/\(\s*([^)=,\s]+)/', $sig, $pm)) {
+                            $fp = trim($pm[1]);
+                            if ($fp !== '' && $fp !== 'void') {
+                                $hasRequired = true;
+                            }
+                        }
+                        $newText = $hasRequired ? "{$dName}(\${1})" : "{$dName}()";
+
                         $completions[] = [
                             'label' => $dName,
                             'kind' => 2, // Method
-                            'detail' => $dInfo['signature'],
+                            'detail' => $sig,
+                            'insertTextFormat' => 2, // Snippet format
                             'documentation' => [
                                 'kind' => 'markdown',
-                                'value' => "**{$cleanTarget}::{$dName}** (Facade method)\n\n```php\npublic static function {$dName}{$dInfo['signature']};\n```",
+                                'value' => "**{$cleanTarget}::{$dName}** (Facade method)\n\n```php\npublic static function {$dName}{$sig};\n```",
                             ],
                             'textEdit' => [
                                 'range' => $range,
-                                'newText' => $dName,
+                                'newText' => $newText,
                             ],
                         ];
                     }
@@ -781,17 +856,21 @@ class BladeMemberCompletionProvider implements CompletionProvider
 
                         $sig = $this->formatMethodSignature($method);
                         $retType = $method->hasReturnType() ? (string) $method->getReturnType() : 'mixed';
+                        $numReq = $method->getNumberOfRequiredParameters();
+                        $newText = $numReq > 0 ? "{$mName}(\${1})" : "{$mName}()";
+
                         $completions[] = [
                             'label' => $mName,
                             'kind' => 2, // Method
                             'detail' => "public {$mName}{$sig}: {$retType} (via {$cleanAccessor})",
+                            'insertTextFormat' => 2, // Snippet format
                             'documentation' => [
                                 'kind' => 'markdown',
                                 'value' => "**{$classOrAlias}::{$mName}**\n\n*Proxying to:* `{$cleanAccessor}::{$mName}`\n\n```php\npublic function {$mName}{$sig}: {$retType};\n```",
                             ],
                             'textEdit' => [
                                 'range' => $range,
-                                'newText' => $mName,
+                                'newText' => $newText,
                             ],
                         ];
                     }
@@ -803,17 +882,28 @@ class BladeMemberCompletionProvider implements CompletionProvider
                             if (isset($seenMembers[$dName])) continue;
                             $seenMembers[$dName] = true;
 
+                            $sig = $dInfo['signature'] ?? '()';
+                            $hasRequired = false;
+                            if (preg_match('/\(\s*([^)=,\s]+)/', $sig, $pm)) {
+                                $fp = trim($pm[1]);
+                                if ($fp !== '' && $fp !== 'void') {
+                                    $hasRequired = true;
+                                }
+                            }
+                            $newText = $hasRequired ? "{$dName}(\${1})" : "{$dName}()";
+
                             $completions[] = [
                                 'label' => $dName,
                                 'kind' => 2,
-                                'detail' => $dInfo['signature'],
+                                'detail' => $sig,
+                                'insertTextFormat' => 2, // Snippet format
                                 'documentation' => [
                                     'kind' => 'markdown',
-                                    'value' => "**{$classOrAlias}::{$dName}** (via {$cleanAccessor})\n\n```php\npublic function {$dName}{$dInfo['signature']};\n```",
+                                    'value' => "**{$classOrAlias}::{$dName}** (via {$cleanAccessor})\n\n```php\npublic function {$dName}{$sig};\n```",
                                 ],
                                 'textEdit' => [
                                     'range' => $range,
-                                    'newText' => $dName,
+                                    'newText' => $newText,
                                 ],
                             ];
                         }

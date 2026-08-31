@@ -76,6 +76,37 @@ BLADE;
 
     expect($userLabels)->toContain('name', 'email', 'id');
 
+    // Verify property completion format: plain text without ()
+    $nameItem = collect($userCompletions)->firstWhere('label', 'name');
+    expect($nameItem)->not->toBeNull();
+    expect($nameItem['kind'])->toBe(10);
+    expect($nameItem['insertTextFormat'])->toBe(1);
+    expect($nameItem['textEdit']['newText'])->toBe('name');
+
+    // Line 13: check collection method completion format: snippet with ()
+    $countItem = collect($usersCompletions)->firstWhere('label', 'count');
+    expect($countItem)->not->toBeNull();
+    expect($countItem['kind'])->toBe(2);
+    expect($countItem['insertTextFormat'])->toBe(2);
+    expect($countItem['textEdit']['newText'])->toBe('count()');
+
+    // Static member completions: Str::
+    $staticCompletions = $compProvider->getStaticMemberCompletions($document, 'Str', '', 50, 10);
+    
+    // Static method Str::of() -> Snippet with ()
+    $ofStaticItem = collect($staticCompletions)->firstWhere('label', 'of');
+    expect($ofStaticItem)->not->toBeNull();
+    expect($ofStaticItem['kind'])->toBe(2);
+    expect($ofStaticItem['insertTextFormat'])->toBe(2);
+    expect($ofStaticItem['textEdit']['newText'])->toBe('of(${1})');
+
+    // Pseudo-constant Str::class -> Constant without ()
+    $classStaticItem = collect($staticCompletions)->firstWhere('label', 'class');
+    expect($classStaticItem)->not->toBeNull();
+    expect($classStaticItem['kind'])->toBe(21);
+    expect($classStaticItem['insertTextFormat'])->toBe(1);
+    expect($classStaticItem['textEdit']['newText'])->toBe('class');
+
     // Test hover on count()
     $hoverProvider = new BladeMemberHoverProvider($project);
     $hoverDoc = new Document('file://' . $tempDir . '/resources/views/test.blade.php', str_replace('{{ $users-> }}', '{{ $users->count() }}', $blade));
