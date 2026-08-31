@@ -219,9 +219,11 @@ class BladeMemberCompletionProvider implements CompletionProvider
     {
         $members = [];
         $cleanType = ltrim(preg_replace('/\|null|\?/', '', $type), '\\');
+        $baseClass = preg_replace('/<.*>$/', '', $cleanType);
+        $baseClass = ltrim(preg_replace('/\[\]$/', '', $baseClass), '\\');
 
         // 1. Loop variable: $loop->index, $loop->iteration, $loop->first, $loop->last, etc.
-        if ($cleanType === 'stdClass' || $cleanType === 'object') {
+        if ($cleanType === 'stdClass' || $cleanType === 'object' || $baseClass === 'stdClass' || $baseClass === 'object') {
             $loopProps = [
                 'index' => ['type' => 'int', 'doc' => 'The index of the current loop iteration (starts at 0).'],
                 'iteration' => ['type' => 'int', 'doc' => 'The current loop iteration (starts at 1).'],
@@ -262,8 +264,8 @@ class BladeMemberCompletionProvider implements CompletionProvider
 
         // 3. Eloquent Model Attributes & Relations from Index
         $models = $this->project->index->models();
-        if (isset($models[$cleanType])) {
-            $modelData = $models[$cleanType];
+        if (isset($models[$baseClass])) {
+            $modelData = $models[$baseClass];
             foreach ($modelData['attributes'] ?? [] as $attr) {
                 $attrName = $attr['name'] ?? '';
                 if ($attrName !== '') {
@@ -292,15 +294,15 @@ class BladeMemberCompletionProvider implements CompletionProvider
             }
         }
 
-        if (!class_exists($cleanType) && !interface_exists($cleanType) && !enum_exists($cleanType)) {
+        if (!class_exists($baseClass) && !interface_exists($baseClass) && !enum_exists($baseClass)) {
             return $members;
         }
 
         try {
-            $reflection = new ReflectionClass($cleanType);
+            $reflection = new ReflectionClass($baseClass);
 
             $classesToSearch = [$reflection];
-            $seenClasses = [$cleanType => true];
+            $seenClasses = [$baseClass => true];
 
             $curr = $reflection;
             while ($curr) {
@@ -433,6 +435,19 @@ class BladeMemberCompletionProvider implements CompletionProvider
         $currentType = $rootType;
         if (preg_match_all('/(?:->|\?->|\[\s*[\'"]?)([a-zA-Z0-9_]+)(?:[\'"]?\s*\]|\([^\)]*\))?/', $chain, $m)) {
             foreach ($m[1] as $member) {
+                // If currentType is Collection/Paginator and accessing element
+                if (in_array($member, ['first', 'last', 'random', 'pop', 'shift', 'sole', 'value'], true)) {
+                    if (preg_match('/(?:Collection|LengthAwarePaginator|Paginator)<(?:[^,]+,\s*)?([^>]+)>/', $currentType, $matchItem)) {
+                        $currentType = trim($matchItem[1]);
+                        continue;
+                    }
+                }
+
+                // If calling collection transformations returning self collection
+                if (in_array($member, ['where', 'filter', 'map', 'values', 'sortBy', 'sortByDesc', 'take', 'skip', 'slice'], true)) {
+                    continue;
+                }
+
                 $members = $this->resolveMembersForType($currentType);
                 if (isset($members[$member])) {
                     $detail = $members[$member]['detail'] ?? '';

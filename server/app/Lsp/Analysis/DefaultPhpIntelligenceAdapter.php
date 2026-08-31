@@ -607,18 +607,20 @@ class DefaultPhpIntelligenceAdapter implements PhpIntelligenceAdapter
      */
     protected function resolveMembersForType(string $type): array
     {
-        $cleanType = ltrim($type, '\\');
+        $cleanType = ltrim(preg_replace('/\|null|\?/', '', $type), '\\');
+        $baseClass = preg_replace('/<.*>$/', '', $cleanType);
+        $baseClass = ltrim(preg_replace('/\[\]$/', '', $baseClass), '\\');
         $members = [];
 
-        if (!class_exists($cleanType) && !interface_exists($cleanType) && !enum_exists($cleanType)) {
+        if (!class_exists($baseClass) && !interface_exists($baseClass) && !enum_exists($baseClass)) {
             return $members;
         }
 
         try {
-            $reflection = new ReflectionClass($cleanType);
+            $reflection = new ReflectionClass($baseClass);
 
             $classesToSearch = [$reflection];
-            $seenClasses = [$cleanType => true];
+            $seenClasses = [$baseClass => true];
 
             $curr = $reflection;
             while ($curr) {

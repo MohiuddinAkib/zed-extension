@@ -70,6 +70,7 @@ class BladeAstAnalyzer
     public function extractTemplateSymbols(string $content, ?string $source = null): array
     {
         $symbols = [];
+        $importedUses = $this->extractUseDirectives($content);
 
         try {
             $doc = BladeDocument::fromText($content);
@@ -91,7 +92,7 @@ class BladeAstAnalyzer
 
             foreach ($doc->findDirectivesByName('php') as $phpDirective) {
                 $line = $phpDirective->position ? $phpDirective->position->startLine : 1;
-                $symbol = $this->parseInlinePhpSymbol((string) $phpDirective->arguments, $source, $line);
+                $symbol = $this->parseInlinePhpSymbol((string) $phpDirective->arguments, $source, $line, $importedUses);
                 if ($symbol !== null) {
                     $symbols[$symbol->name] = $symbol;
                 }
@@ -99,14 +100,14 @@ class BladeAstAnalyzer
 
             foreach ($doc->getPhpBlocks() as $phpBlock) {
                 $line = $phpBlock->position ? $phpBlock->position->startLine : 1;
-                foreach ($this->parsePhpBlockSymbols((string) $phpBlock->innerContent, $source, $line, '@php') as $name => $symbol) {
+                foreach ($this->parsePhpBlockSymbols((string) $phpBlock->innerContent, $source, $line, '@php', $importedUses) as $name => $symbol) {
                     $symbols[$name] = $symbol;
                 }
             }
 
             foreach ($doc->getPhpTags() as $phpTag) {
                 $line = $phpTag->position ? $phpTag->position->startLine : 1;
-                foreach ($this->parsePhpBlockSymbols((string) $phpTag->innerContent, $source, $line, '<' . '?php') as $name => $symbol) {
+                foreach ($this->parsePhpBlockSymbols((string) $phpTag->innerContent, $source, $line, '<' . '?php', $importedUses) as $name => $symbol) {
                     $symbols[$name] = $symbol;
                 }
             }
@@ -124,7 +125,7 @@ class BladeAstAnalyzer
                 $code = $match[0];
                 $offset = $match[1];
                 $line = substr_count(substr($content, 0, $offset), "\n") + 1;
-                foreach ($this->parsePhpBlockSymbols($code, $source, $line, '<' . '?php') as $name => $symbol) {
+                foreach ($this->parsePhpBlockSymbols($code, $source, $line, '<' . '?php', $importedUses) as $name => $symbol) {
                     if (!isset($symbols[$name])) {
                         $symbols[$name] = $symbol;
                     }
@@ -137,7 +138,7 @@ class BladeAstAnalyzer
                 $code = $match[0];
                 $offset = $match[1];
                 $line = substr_count(substr($content, 0, $offset), "\n") + 1;
-                foreach ($this->parsePhpBlockSymbols($code, $source, $line, '@php') as $name => $symbol) {
+                foreach ($this->parsePhpBlockSymbols($code, $source, $line, '@php', $importedUses) as $name => $symbol) {
                     if (!isset($symbols[$name])) {
                         $symbols[$name] = $symbol;
                     }
@@ -386,7 +387,7 @@ class BladeAstAnalyzer
         );
     }
 
-    protected function parseInlinePhpSymbol(string $rawArgs, ?string $source, int $line): ?VariableSymbol
+    protected function parseInlinePhpSymbol(string $rawArgs, ?string $source, int $line, array $importedUses = []): ?VariableSymbol
     {
         $parsed = $this->parseExpression($this->unwrapDirectiveArguments($rawArgs));
 
@@ -396,7 +397,7 @@ class BladeAstAnalyzer
 
         return new VariableSymbol(
             name: $parsed->var->name,
-            type: TypeRef::fromString($this->inferTypeFromExprNode($parsed->expr)),
+            type: TypeRef::fromString($this->inferTypeFromExprNode($parsed->expr, [], $importedUses)),
             origin: new ScopeOrigin('@php', $source, $line, 'Locally defined @php variable'),
             detail: 'Locally defined @php variable',
             range: SourceRange::line($line),
@@ -406,7 +407,7 @@ class BladeAstAnalyzer
     /**
      * @return array<string, VariableSymbol>
      */
-    protected function parsePhpBlockSymbols(string $code, ?string $source, int $startLine, string $originName = '@php'): array
+    protected function parsePhpBlockSymbols(string $code, ?string $source, int $startLine, string $originName = '@php', array $importedUses = []): array
     {
         $symbols = [];
         $stmts = $this->parsePhpStatements($code);
@@ -415,6 +416,7 @@ class BladeAstAnalyzer
             return [];
         }
 
+        $localScope = [];
         $assignments = $this->nodeFinder->find($stmts, fn (Node $node): bool => $node instanceof Assign);
 
         foreach ($assignments as $assignment) {
@@ -431,7 +433,12 @@ class BladeAstAnalyzer
             }
 
             $line = $this->lineForPhpNode($code, $assignment, $startLine);
-            $typeStr = $docType ?? $this->inferTypeFromExprNode($assignment->expr);
+            $typeStr = $docType ?? $this->inferTypeFromExprNode($assignment->expr, $localScope, $importedUses);
+
+            $localScope[$assignment->var->name] = [
+                'name' => $assignment->var->name,
+                'type' => $typeStr,
+            ];
 
             $symbols[$assignment->var->name] = new VariableSymbol(
                 name: $assignment->var->name,
@@ -569,8 +576,13 @@ class BladeAstAnalyzer
         return $rawArgs;
     }
 
-    protected function inferTypeFromExprNode(Expr $expr): string
+    protected function inferTypeFromExprNode(Expr $expr, array $localScope = [], array $importedUses = []): string
     {
+        if ($expr instanceof Variable && is_string($expr->name)) {
+            $varName = $expr->name;
+            return $localScope[$varName]['type'] ?? 'mixed';
+        }
+
         if ($expr instanceof String_) {
             return 'string';
         }
@@ -597,7 +609,11 @@ class BladeAstAnalyzer
         }
 
         if ($expr instanceof New_ && $expr->class instanceof Name) {
-            return '\\' . ltrim($expr->class->toString(), '\\');
+            $rawClass = $expr->class->toString();
+            $first = $expr->class->getFirst();
+            return isset($importedUses[$first])
+                ? $importedUses[$first]['class'] . substr($rawClass, strlen($first))
+                : '\\' . ltrim($rawClass, '\\');
         }
 
         if ($expr instanceof ArrowFunction || $expr instanceof ClosureExpr) {
@@ -607,7 +623,7 @@ class BladeAstAnalyzer
         if ($expr instanceof Match_) {
             $types = [];
             foreach ($expr->arms as $arm) {
-                $types[] = TypeRef::fromString($this->inferTypeFromExprNode($arm->body));
+                $types[] = TypeRef::fromString($this->inferTypeFromExprNode($arm->body, $localScope, $importedUses));
             }
 
             return (string) TypeRef::union($types);
@@ -616,20 +632,33 @@ class BladeAstAnalyzer
         if ($expr instanceof Ternary) {
             $types = [];
             if ($expr->if !== null) {
-                $types[] = TypeRef::fromString($this->inferTypeFromExprNode($expr->if));
+                $types[] = TypeRef::fromString($this->inferTypeFromExprNode($expr->if, $localScope, $importedUses));
             }
-            $types[] = TypeRef::fromString($this->inferTypeFromExprNode($expr->else));
+            $types[] = TypeRef::fromString($this->inferTypeFromExprNode($expr->else, $localScope, $importedUses));
 
             return (string) TypeRef::union($types);
         }
 
         if ($expr instanceof ClassConstFetch && $expr->name instanceof Identifier && strtolower($expr->name->name) === 'class') {
-            $class = $expr->class instanceof Name ? '\\' . ltrim($expr->class->toString(), '\\') : 'object';
+            $rawClass = $expr->class instanceof Name ? $expr->class->toString() : 'object';
+            if ($expr->class instanceof Name) {
+                $first = $expr->class->getFirst();
+                $class = isset($importedUses[$first])
+                    ? $importedUses[$first]['class'] . substr($rawClass, strlen($first))
+                    : '\\' . ltrim($rawClass, '\\');
+            } else {
+                $class = 'object';
+            }
             return "class-string<{$class}>";
         }
 
         if ($expr instanceof \PhpParser\Node\Expr\StaticCall && $expr->class instanceof Name && $expr->name instanceof Identifier) {
-            $className = '\\' . ltrim($expr->class->toString(), '\\');
+            $rawClass = $expr->class->toString();
+            $first = $expr->class->getFirst();
+            $className = isset($importedUses[$first])
+                ? $importedUses[$first]['class'] . substr($rawClass, strlen($first))
+                : '\\' . ltrim($rawClass, '\\');
+
             $methodName = $expr->name->toString();
             if (in_array($methodName, ['all', 'get', 'paginate', 'cursor', 'lazy'], true)) {
                 return "\\Illuminate\\Database\\Eloquent\\Collection<int, {$className}>";
@@ -638,6 +667,40 @@ class BladeAstAnalyzer
                 return $className;
             }
             return $className;
+        }
+
+        if ($expr instanceof \PhpParser\Node\Expr\MethodCall && $expr->name instanceof Identifier) {
+            $methodName = $expr->name->toString();
+            $parentType = $this->inferTypeFromExprNode($expr->var, $localScope, $importedUses);
+
+            if (in_array($methodName, ['first', 'last', 'random', 'pop', 'shift', 'sole', 'value'], true)) {
+                if (preg_match('/(?:Collection|LengthAwarePaginator|Paginator)<(?:[^,]+,\s*)?([^>]+)>/', $parentType, $m)) {
+                    return trim($m[1]);
+                }
+            }
+
+            if (in_array($methodName, ['where', 'filter', 'map', 'values', 'sortBy', 'sortByDesc', 'take', 'skip', 'slice'], true)) {
+                return $parentType;
+            }
+
+            if (in_array($methodName, ['count'], true)) {
+                return 'int';
+            }
+
+            if (in_array($methodName, ['toArray'], true)) {
+                return 'array';
+            }
+
+            if (in_array($methodName, ['toJson'], true)) {
+                return 'string';
+            }
+
+            if (in_array($methodName, ['paginate', 'simplePaginate', 'cursorPaginate'], true)) {
+                if (preg_match('/Collection<int,\s*([^>]+)>/', $parentType, $m)) {
+                    return "\\Illuminate\\Pagination\\LengthAwarePaginator<int, {$m[1]}>";
+                }
+                return '\\Illuminate\\Pagination\\LengthAwarePaginator';
+            }
         }
 
         if ($expr instanceof FuncCall && $expr->name instanceof Name) {
