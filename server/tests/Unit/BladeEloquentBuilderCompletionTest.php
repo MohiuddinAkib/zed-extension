@@ -116,5 +116,33 @@ BLADE;
     expect($hover['contents']['value'])->toContain('where');
     expect($hover['contents']['value'])->toContain('Eloquent Builder');
 
+    // 6. Test in-progress static chain: User::where('active', true)->
+    $chainDoc = new Document('file://' . $tempDir . '/resources/views/chain.blade.php', "@use('App\\Models\\User')\n{{ User::where('active', true)-> }}");
+    $chainCompletions = $compProvider->get($chainDoc, ['line' => 1, 'character' => 32]);
+    $chainLabels = collect($chainCompletions)->pluck('label')->all();
+
+    expect($chainLabels)->toContain('get', 'first', 'paginate', 'latest', 'orderBy', 'where', 'whereIn', 'count');
+
+    // 7. Test in-progress static chain: User::query()->
+    $queryChainDoc = new Document('file://' . $tempDir . '/resources/views/query_chain.blade.php', "@use('App\\Models\\User')\n{{ User::query()-> }}");
+    $queryChainCompletions = $compProvider->get($queryChainDoc, ['line' => 1, 'character' => 18]);
+    $queryChainLabels = collect($queryChainCompletions)->pluck('label')->all();
+
+    expect($queryChainLabels)->toContain('where', 'get', 'first', 'latest');
+
+    // 8. Test fluent static chain to collection: User::where('active', true)->get()->
+    $getChainDoc = new Document('file://' . $tempDir . '/resources/views/get_chain.blade.php', "@use('App\\Models\\User')\n{{ User::where('active', true)->get()-> }}");
+    $getChainCompletions = $compProvider->get($getChainDoc, ['line' => 1, 'character' => 39]);
+    $getChainLabels = collect($getChainCompletions)->pluck('label')->all();
+
+    expect($getChainLabels)->toContain('first', 'map', 'filter', 'each', 'pluck');
+
+    // 9. Test fluent static chain to model: User::where('active', true)->first()->
+    $firstChainDoc = new Document('file://' . $tempDir . '/resources/views/first_chain.blade.php', "@use('App\\Models\\User')\n{{ User::where('active', true)->first()-> }}");
+    $firstChainCompletions = $compProvider->get($firstChainDoc, ['line' => 1, 'character' => 41]);
+    $firstChainLabels = collect($firstChainCompletions)->pluck('label')->all();
+
+    expect($firstChainLabels)->toContain('id', 'name', 'email');
+
     @unlink($tempDir);
 });

@@ -8,60 +8,86 @@ use App\Lsp\Analysis\BladeAstAnalyzer;
 use App\Lsp\Analysis\BladePhpAstAnalyzer;
 use App\Lsp\Analysis\BladeScopeResolver;
 use App\Lsp\Analysis\DocBlockParser;
+use App\Lsp\Analysis\FunctionTypeResolver;
+use App\Lsp\Analysis\SemanticIndex;
 use App\Lsp\Contracts\HoverProvider;
 use App\Lsp\Document;
-use App\Lsp\Features\AppBindings\AppBindingContainerTypeMap;
+use App\Lsp\Features\Facades\FacadeMap;
+use App\Lsp\Features\Functions\GlobalFunctionRegistry;
 use App\Lsp\Project;
 use App\Lsp\Support\FileUri;
+use Illuminate\Container\Container;
 use ReflectionClass;
-use ReflectionMethod;
-use ReflectionProperty;
 use Throwable;
 
 class BladeMemberHoverProvider implements HoverProvider
 {
     public const HIGHER_ORDER_COLLECTION_PROXIES = [
-        'average' => 'Calculate average value by property/method across items',
-        'avg' => 'Calculate average value by property/method across items',
-        'contains' => 'Determine if any item matches the condition or property',
-        'each' => 'Execute a callback / method on each item',
-        'every' => 'Verify that all items match the condition or property',
-        'filter' => 'Filter items using a method or truthy property',
-        'first' => 'Get the first item matching the property/method',
-        'flatMap' => 'Map a collection and flatten the result',
-        'groupBy' => 'Group collection items by property or method',
-        'keyBy' => 'Key collection items by property or method',
-        'map' => 'Transform each item via property access or method call',
-        'max' => 'Get maximum value by property/method across items',
-        'min' => 'Get minimum value by property/method across items',
-        'partition' => 'Separate items into two collections by condition',
-        'reject' => 'Filter out items using a method or truthy property',
-        'skipUntil' => 'Skip items until condition or property is met',
-        'skipWhile' => 'Skip items while condition or property is met',
-        'some' => 'Determine if any item matches the condition or property',
-        'sortBy' => 'Sort items by property or method in ascending order',
+        'average'    => 'Calculate average value by property/method across items',
+        'avg'        => 'Calculate average value by property/method across items',
+        'contains'   => 'Determine if any item matches the condition or property',
+        'each'       => 'Execute a callback / method on each item',
+        'every'      => 'Verify that all items match the condition or property',
+        'filter'     => 'Filter items using a method or truthy property',
+        'first'      => 'Get the first item matching the property/method',
+        'flatMap'    => 'Map a collection and flatten the result',
+        'groupBy'    => 'Group collection items by property or method',
+        'keyBy'      => 'Key collection items by property or method',
+        'map'        => 'Transform each item via property access or method call',
+        'max'        => 'Get maximum value by property/method across items',
+        'min'        => 'Get minimum value by property/method across items',
+        'partition'  => 'Separate items into two collections by condition',
+        'reject'     => 'Filter out items using a method or truthy property',
+        'skipUntil'  => 'Skip items until condition or property is met',
+        'skipWhile'  => 'Skip items while condition or property is met',
+        'some'       => 'Determine if any item matches the condition or property',
+        'sortBy'     => 'Sort items by property or method in ascending order',
         'sortByDesc' => 'Sort items by property or method in descending order',
-        'sum' => 'Sum property or method values across items',
-        'takeUntil' => 'Take items until condition or property is met',
-        'takeWhile' => 'Take items while condition or property is met',
-        'unique' => 'Filter collection so only unique items by property remain',
-        'until' => 'Take items until condition or property is met',
+        'sum'        => 'Sum property or method values across items',
+        'takeUntil'  => 'Take items until condition or property is met',
+        'takeWhile'  => 'Take items while condition or property is met',
+        'unique'     => 'Filter collection so only unique items by property remain',
+        'until'      => 'Take items until condition or property is met',
     ];
 
     protected BladeAstAnalyzer $bladeAnalyzer;
+
     protected BladePhpAstAnalyzer $bladePhpAstAnalyzer;
+
     protected BladeScopeResolver $scopeResolver;
+
     protected DocBlockParser $docBlockParser;
+
+    protected SemanticIndex $semanticIndex;
+
+    protected FunctionTypeResolver $functionTypeResolver;
+
     protected bool $autoloaderRegistered = false;
 
     public function __construct(
         protected Project $project,
+        ?SemanticIndex $semanticIndex = null,
+        ?FunctionTypeResolver $functionTypeResolver = null,
     ) {
-        $this->bladeAnalyzer = new BladeAstAnalyzer();
-        $this->bladePhpAstAnalyzer = new BladePhpAstAnalyzer();
+        $this->semanticIndex = $semanticIndex ?? $this->resolveSemanticIndex();
+        $this->functionTypeResolver = $functionTypeResolver ?? new FunctionTypeResolver($this->project, semanticIndex: $this->semanticIndex);
+        $this->bladeAnalyzer = new BladeAstAnalyzer($this->project, $this->functionTypeResolver);
+        $this->bladePhpAstAnalyzer = new BladePhpAstAnalyzer;
         $this->scopeResolver = new BladeScopeResolver($this->project, $this->bladeAnalyzer);
-        $this->docBlockParser = new DocBlockParser();
+        $this->docBlockParser = new DocBlockParser;
     }
+
+    protected function resolveSemanticIndex(): SemanticIndex
+    {
+        $container = Container::getInstance();
+
+        if ($container->bound(SemanticIndex::class)) {
+            return $container->make(SemanticIndex::class);
+        }
+
+        return new SemanticIndex($this->project);
+    }
+
 
     /**
      * Provide hover information for object members and array keys in Blade templates.
@@ -97,7 +123,7 @@ class BladeMemberHoverProvider implements HoverProvider
             $isArrayAccess = $astExpr['isArrayAccess'];
             $range = [
                 'start' => ['line' => $lineNumber, 'character' => $astExpr['startCol']],
-                'end' => ['line' => $lineNumber, 'character' => $astExpr['endCol']],
+                'end'   => ['line' => $lineNumber, 'character' => $astExpr['endCol']],
             ];
         } else {
             $fallback = $this->findMemberAtPosition($line, $character);
@@ -112,7 +138,7 @@ class BladeMemberHoverProvider implements HoverProvider
             $isArrayAccess = $fallback['isArrayAccess'];
             $range = [
                 'start' => ['line' => $lineNumber, 'character' => $fallback['start']],
-                'end' => ['line' => $lineNumber, 'character' => $fallback['end']],
+                'end'   => ['line' => $lineNumber, 'character' => $fallback['end']],
             ];
         }
 
@@ -139,22 +165,17 @@ class BladeMemberHoverProvider implements HoverProvider
             $importedUses = $this->bladeAnalyzer->extractUseDirectives($document->content);
             if (isset($importedUses[$rootClass])) {
                 $rootType = $importedUses[$rootClass]['class'];
-            } elseif (\App\Lsp\Features\Facades\FacadeMap::isFacadeOrAlias($rootClass)) {
-                $rootType = \App\Lsp\Features\Facades\FacadeMap::resolve($rootClass);
-                $accessorType = \App\Lsp\Features\Facades\FacadeMap::resolveAccessor($rootClass);
+            } elseif (FacadeMap::isFacadeOrAlias($rootClass)) {
+                $rootType = FacadeMap::resolve($rootClass);
+                $accessorType = FacadeMap::resolveAccessor($rootClass);
             } else {
                 $rootType = '\\' . ltrim($rootClass, '\\');
             }
         } elseif ($rootCall !== null) {
-            $rootType = match ($rootCall) {
-                'app', 'resolve' => $rootCallArg ? AppBindingContainerTypeMap::resolveType($rootCallArg) : '\Illuminate\Foundation\Application',
-                'auth' => '\Illuminate\Auth\AuthManager',
-                'request' => '\Illuminate\Http\Request',
-                'session' => '\Illuminate\Session\SessionManager',
-                'now', 'today' => '\Illuminate\Support\Carbon',
-                default => null,
-            };
+            $argCount = trim($rootCallArg ?? '') === '' ? 0 : 1;
+            $rootType = $this->functionTypeResolver->resolve($rootCall, $rootCallArg, $document, $argCount);
         } elseif ($varName !== '' && isset($variables[$varName])) {
+
             $rootType = $variables[$varName]['type'] ?? 'mixed';
             $rootType = $this->qualifyType($rootType, $document);
             $varSource = $variables[$varName]['source'] ?? null;
@@ -166,6 +187,7 @@ class BladeMemberHoverProvider implements HoverProvider
             if ($classHover !== null) {
                 return $classHover;
             }
+
             return null;
         }
 
@@ -184,6 +206,7 @@ class BladeMemberHoverProvider implements HoverProvider
             if ($classHover !== null) {
                 return $classHover;
             }
+
             return null;
         }
 
@@ -234,9 +257,9 @@ class BladeMemberHoverProvider implements HoverProvider
         }
 
         return [
-            'range' => $range,
+            'range'    => $range,
             'contents' => [
-                'kind' => 'markdown',
+                'kind'  => 'markdown',
                 'value' => trim($markdown),
             ],
         ];
@@ -267,14 +290,14 @@ class BladeMemberHoverProvider implements HoverProvider
 
                         if ($character >= $memberOffset && $character <= $memberEnd) {
                             return [
-                                'varName' => '',
-                                'rootCall' => 'app',
-                                'rootCallArg' => $bindingKey,
-                                'chain' => $accumulatedChain,
-                                'memberName' => $memberName,
+                                'varName'       => '',
+                                'rootCall'      => 'app',
+                                'rootCallArg'   => $bindingKey,
+                                'chain'         => $accumulatedChain,
+                                'memberName'    => $memberName,
                                 'isArrayAccess' => !$isObject,
-                                'start' => $memberOffset,
-                                'end' => $memberEnd,
+                                'start'         => $memberOffset,
+                                'end'           => $memberEnd,
                             ];
                         }
 
@@ -302,14 +325,14 @@ class BladeMemberHoverProvider implements HoverProvider
 
                         if ($character >= $memberOffset && $character <= $memberEnd) {
                             return [
-                                'varName' => $varName,
-                                'rootCall' => 'tap',
-                                'rootCallArg' => $newClass ?: $varName,
-                                'chain' => $accumulatedChain,
-                                'memberName' => $memberName,
+                                'varName'       => $varName,
+                                'rootCall'      => 'tap',
+                                'rootCallArg'   => $newClass ?: $varName,
+                                'chain'         => $accumulatedChain,
+                                'memberName'    => $memberName,
                                 'isArrayAccess' => !$isObject,
-                                'start' => $memberOffset,
-                                'end' => $memberEnd,
+                                'start'         => $memberOffset,
+                                'end'           => $memberEnd,
                             ];
                         }
 
@@ -319,12 +342,13 @@ class BladeMemberHoverProvider implements HoverProvider
             }
         }
 
-        // 3. Match helpers (auth(), request(), session(), now(), today())
-        if (preg_match_all('/(auth|request|session|now|today)\s*\(\s*\)((?:(?:->|\?->)[a-zA-Z0-9_]+(?:\([^\)]*\))?|\[[^\]]*\])+)/', $line, $matches, PREG_OFFSET_CAPTURE | PREG_SET_ORDER)) {
+        // 3. Match function and helper calls (auth(), request(), session(), cart(), now(), today())
+        if (preg_match_all('/([a-zA-Z_\x7f-\xff][a-zA-Z0-9_\x7f-\xff]*)\s*\((.*?)\)((?:(?:->|\?->)[a-zA-Z0-9_]+(?:\([^\)]*\))?|\[[^\]]*\])+)/', $line, $matches, PREG_OFFSET_CAPTURE | PREG_SET_ORDER)) {
             foreach ($matches as $m) {
                 $helperName = $m[1][0];
-                $fullChain = $m[2][0];
-                $chainOffset = $m[2][1];
+                $callArg = trim($m[2][0]) !== '' ? trim($m[2][0]) : null;
+                $fullChain = $m[3][0];
+                $chainOffset = $m[3][1];
 
                 if (preg_match_all('/(?:(->|\?->)([a-zA-Z0-9_]+)|\[\s*([\'"]?)([a-zA-Z0-9_]+)\3\s*\])/', $fullChain, $segments, PREG_OFFSET_CAPTURE | PREG_SET_ORDER)) {
                     $accumulatedChain = '';
@@ -336,14 +360,14 @@ class BladeMemberHoverProvider implements HoverProvider
 
                         if ($character >= $memberOffset && $character <= $memberEnd) {
                             return [
-                                'varName' => '',
-                                'rootCall' => $helperName,
-                                'rootCallArg' => null,
-                                'chain' => $accumulatedChain,
-                                'memberName' => $memberName,
+                                'varName'       => '',
+                                'rootCall'      => $helperName,
+                                'rootCallArg'   => $callArg,
+                                'chain'         => $accumulatedChain,
+                                'memberName'    => $memberName,
                                 'isArrayAccess' => !$isObject,
-                                'start' => $memberOffset,
-                                'end' => $memberEnd,
+                                'start'         => $memberOffset,
+                                'end'           => $memberEnd,
                             ];
                         }
 
@@ -352,6 +376,7 @@ class BladeMemberHoverProvider implements HoverProvider
                 }
             }
         }
+
 
         // 4. Match variable access chains
         if (preg_match_all('/\$([a-zA-Z0-9_]+)((?:(?:->|\?->)[a-zA-Z0-9_]+(?:\([^\)]*\))?|\[[^\]]*\])+)/', $line, $matches, PREG_OFFSET_CAPTURE | PREG_SET_ORDER)) {
@@ -370,14 +395,14 @@ class BladeMemberHoverProvider implements HoverProvider
 
                         if ($character >= $memberOffset && $character <= $memberEnd) {
                             return [
-                                'varName' => $varName,
-                                'rootCall' => null,
-                                'rootCallArg' => null,
-                                'chain' => $accumulatedChain,
-                                'memberName' => $memberName,
+                                'varName'       => $varName,
+                                'rootCall'      => null,
+                                'rootCallArg'   => null,
+                                'chain'         => $accumulatedChain,
+                                'memberName'    => $memberName,
                                 'isArrayAccess' => !$isObject,
-                                'start' => $memberOffset,
-                                'end' => $memberEnd,
+                                'start'         => $memberOffset,
+                                'end'           => $memberEnd,
                             ];
                         }
 
@@ -404,27 +429,28 @@ class BladeMemberHoverProvider implements HoverProvider
         // 1. Loop variable: $loop->index, $loop->iteration, $loop->first, $loop->last, etc.
         if ($varName === 'loop' || $cleanType === 'stdClass' || $cleanType === 'object' || $baseClass === 'stdClass' || $baseClass === 'object') {
             $loopProps = [
-                'index' => ['type' => 'int', 'doc' => 'The index of the current loop iteration (starts at 0).'],
+                'index'     => ['type' => 'int', 'doc' => 'The index of the current loop iteration (starts at 0).'],
                 'iteration' => ['type' => 'int', 'doc' => 'The current loop iteration (starts at 1).'],
                 'remaining' => ['type' => 'int', 'doc' => 'The iterations remaining in the loop.'],
-                'count' => ['type' => 'int', 'doc' => 'The total number of items in the array being iterated.'],
-                'first' => ['type' => 'bool', 'doc' => 'Whether this is the first iteration through the loop.'],
-                'last' => ['type' => 'bool', 'doc' => 'Whether this is the last iteration through the loop.'],
-                'even' => ['type' => 'bool', 'doc' => 'Whether this is an even iteration through the loop.'],
-                'odd' => ['type' => 'bool', 'doc' => 'Whether this is an odd iteration through the loop.'],
-                'depth' => ['type' => 'int', 'doc' => 'The nesting level of the current loop.'],
-                'parent' => ['type' => '?object', 'doc' => 'When in a nested loop, the parent loop variable.'],
+                'count'     => ['type' => 'int', 'doc' => 'The total number of items in the array being iterated.'],
+                'first'     => ['type' => 'bool', 'doc' => 'Whether this is the first iteration through the loop.'],
+                'last'      => ['type' => 'bool', 'doc' => 'Whether this is the last iteration through the loop.'],
+                'even'      => ['type' => 'bool', 'doc' => 'Whether this is an even iteration through the loop.'],
+                'odd'       => ['type' => 'bool', 'doc' => 'Whether this is an odd iteration through the loop.'],
+                'depth'     => ['type' => 'int', 'doc' => 'The nesting level of the current loop.'],
+                'parent'    => ['type' => '?object', 'doc' => 'When in a nested loop, the parent loop variable.'],
             ];
             if (isset($loopProps[$memberName])) {
                 $p = $loopProps[$memberName];
+
                 return [
-                    'title' => "\$loop->{$memberName}",
-                    'type' => $p['type'],
-                    'origin' => 'Blade Loop Property',
+                    'title'         => "\$loop->{$memberName}",
+                    'type'          => $p['type'],
+                    'origin'        => 'Blade Loop Property',
                     'documentation' => $p['doc'],
-                    'isMethod' => false,
-                    'source' => null,
-                    'line' => null,
+                    'isMethod'      => false,
+                    'source'        => null,
+                    'line'          => null,
                 ];
             }
         }
@@ -433,18 +459,19 @@ class BladeMemberHoverProvider implements HoverProvider
         $shapeKeys = $this->docBlockParser->extractArrayShapeKeys($cleanType);
         if (isset($shapeKeys[$memberName])) {
             $propType = $shapeKeys[$memberName]['type'];
+
             return [
-                'title' => "\${$varName}['{$memberName}']",
-                'type' => $propType,
-                'origin' => 'Array Shape',
+                'title'    => "\${$varName}['{$memberName}']",
+                'type'     => $propType,
+                'origin'   => 'Array Shape',
                 'isMethod' => false,
-                'source' => $varSource,
-                'line' => $varLine,
+                'source'   => $varSource,
+                'line'     => $varLine,
             ];
         }
 
         // 3. Eloquent Model Attributes & Relations from Project Index
-        $models = $this->project->index->models();
+        $models = $this->semanticIndex->models();
         if (isset($models[$baseClass])) {
             $modelData = $models[$baseClass];
             $modelPath = !empty($modelData['path']) ? $this->relativePath($modelData['path']) : null;
@@ -454,13 +481,14 @@ class BladeMemberHoverProvider implements HoverProvider
             foreach ($modelData['attributes'] ?? [] as $attr) {
                 if (($attr['name'] ?? '') === $memberName) {
                     $attrType = $attr['cast'] ?? $attr['type'] ?? 'mixed';
+
                     return [
-                        'title' => "{$baseClass}::\${$memberName}",
-                        'type' => $attrType,
-                        'origin' => "Eloquent Attribute ({$shortName})",
+                        'title'    => "{$baseClass}::\${$memberName}",
+                        'type'     => $attrType,
+                        'origin'   => "Eloquent Attribute ({$shortName})",
                         'isMethod' => false,
-                        'source' => $modelPath,
-                        'line' => $modelLine,
+                        'source'   => $modelPath,
+                        'line'     => $modelLine,
                     ];
                 }
             }
@@ -469,13 +497,14 @@ class BladeMemberHoverProvider implements HoverProvider
                 if (($rel['name'] ?? '') === $memberName) {
                     $relType = $rel['type'] ?? 'Relation';
                     $relRelated = $rel['related'] ?? 'Model';
+
                     return [
-                        'title' => "{$baseClass}::\${$memberName}",
-                        'type' => '\\' . ltrim($relRelated, '\\'),
-                        'origin' => "Eloquent Relation ({$relType} -> {$relRelated})",
+                        'title'    => "{$baseClass}::\${$memberName}",
+                        'type'     => '\\' . ltrim($relRelated, '\\'),
+                        'origin'   => "Eloquent Relation ({$relType} -> {$relRelated})",
                         'isMethod' => false,
-                        'source' => $modelPath,
-                        'line' => $modelLine,
+                        'source'   => $modelPath,
+                        'line'     => $modelLine,
                     ];
                 }
             }
@@ -486,27 +515,28 @@ class BladeMemberHoverProvider implements HoverProvider
             $itemType = $this->extractCollectionItemType($type) ?? 'mixed';
             $shortItemType = class_basename($itemType);
             $doc = self::HIGHER_ORDER_COLLECTION_PROXIES[$memberName];
+
             return [
-                'title' => "Higher Order Collection Proxy ({$memberName})",
-                'type' => "HigherOrderCollectionProxy<{$shortItemType}>",
-                'origin' => 'Laravel Higher Order Message',
+                'title'         => "Higher Order Collection Proxy ({$memberName})",
+                'type'          => "HigherOrderCollectionProxy<{$shortItemType}>",
+                'origin'        => 'Laravel Higher Order Message',
                 'documentation' => "**Higher Order Collection Proxy (`{$memberName}`)**\n\n```php\n\$collection->{$memberName}->...\n```\n\n{$doc}.\n\n*Target Item Type:* `{$itemType}`",
-                'isMethod' => false,
-                'source' => null,
-                'line' => null,
+                'isMethod'      => false,
+                'source'        => null,
+                'line'          => null,
             ];
         }
 
         // 5. Higher Order Tap Proxy
         if ($memberName === 'tap') {
             return [
-                'title' => 'Higher Order Tap Proxy',
-                'type' => "HigherOrderTapProxy<" . class_basename($cleanType) . ">",
-                'origin' => 'Laravel Higher Order Message',
+                'title'         => 'Higher Order Tap Proxy',
+                'type'          => 'HigherOrderTapProxy<' . class_basename($cleanType) . '>',
+                'origin'        => 'Laravel Higher Order Message',
                 'documentation' => "**Higher Order Tap Proxy**\n\n```php\n\$var->tap()->... or \$var->tap->...\n```\n\nPasses the target object into a closure and returns it.",
-                'isMethod' => false,
-                'source' => null,
-                'line' => null,
+                'isMethod'      => false,
+                'source'        => null,
+                'line'          => null,
             ];
         }
 
@@ -518,22 +548,20 @@ class BladeMemberHoverProvider implements HoverProvider
                 ? (EloquentBuilderRegistry::extractModelFromBuilder($type) ?? $baseClass)
                 : $baseClass;
 
-            if (isset(EloquentBuilderRegistry::BUILDER_METHODS[$memberName])) {
-                $bInfo = EloquentBuilderRegistry::BUILDER_METHODS[$memberName];
+            $builderMembers = $this->semanticIndex->eloquentMembersForModel($targetModel, false);
+            if (isset($builderMembers[$memberName])) {
+                $member = $builderMembers[$memberName];
                 $modelDisplay = class_basename($targetModel);
-                $fullModel = '\\' . ltrim($targetModel, '\\');
-                $ret = str_replace('Model', $fullModel, $bInfo['return']);
-                $sig = str_replace('Model', $modelDisplay, $bInfo['signature']);
 
                 return [
-                    'title' => "{$modelDisplay}::{$memberName}()",
-                    'type' => $ret,
-                    'origin' => 'Eloquent Builder',
-                    'isMethod' => true,
-                    'signature' => "public function {$memberName}{$sig}: {$ret}",
-                    'documentation' => $bInfo['doc'],
-                    'source' => null,
-                    'line' => null,
+                    'title'         => "{$modelDisplay}::{$memberName}()",
+                    'type'          => (string) ($member['returnType'] ?? 'mixed'),
+                    'origin'        => str_contains((string) ($member['documentation'] ?? ''), 'Eloquent Local Scope') ? 'Eloquent Local Scope' : 'Eloquent Builder',
+                    'isMethod'      => true,
+                    'signature'     => "public function {$memberName}" . ($member['paramSignature'] ?? '()') . ': ' . ($member['returnType'] ?? 'mixed'),
+                    'documentation' => (string) ($member['documentation'] ?? ''),
+                    'source'        => null,
+                    'line'          => null,
                 ];
             }
         }
@@ -579,27 +607,29 @@ class BladeMemberHoverProvider implements HoverProvider
                     $docProps = $this->docBlockParser->extractProperties($docComment);
                     if (isset($docProps[$memberName])) {
                         $pType = $docProps[$memberName];
+
                         return [
-                            'title' => "{$targetRef->getName()}::\${$memberName}",
-                            'type' => $pType,
-                            'origin' => 'Property (' . $targetRef->getShortName() . ')',
+                            'title'    => "{$targetRef->getName()}::\${$memberName}",
+                            'type'     => $pType,
+                            'origin'   => 'Property (' . $targetRef->getShortName() . ')',
                             'isMethod' => false,
-                            'source' => $targetFile,
-                            'line' => $targetLine,
+                            'source'   => $targetFile,
+                            'line'     => $targetLine,
                         ];
                     }
 
                     $docMethods = $this->docBlockParser->extractMethods($docComment);
                     if (isset($docMethods[$memberName])) {
                         $mInfo = $docMethods[$memberName];
+
                         return [
-                            'title' => "{$targetRef->getName()}::{$memberName}()",
-                            'type' => $mInfo['returnType'],
-                            'origin' => 'Method (' . $targetRef->getShortName() . ')',
-                            'isMethod' => true,
+                            'title'     => "{$targetRef->getName()}::{$memberName}()",
+                            'type'      => $mInfo['returnType'],
+                            'origin'    => 'Method (' . $targetRef->getShortName() . ')',
+                            'isMethod'  => true,
                             'signature' => $mInfo['signature'],
-                            'source' => $targetFile,
-                            'line' => $targetLine,
+                            'source'    => $targetFile,
+                            'line'      => $targetLine,
                         ];
                     }
                 }
@@ -608,22 +638,22 @@ class BladeMemberHoverProvider implements HoverProvider
                 if ($targetRef->isEnum()) {
                     if ($memberName === 'value') {
                         return [
-                            'title' => "{$targetRef->getName()}::\$value",
-                            'type' => 'string|int',
-                            'origin' => 'Backed Enum Property',
+                            'title'    => "{$targetRef->getName()}::\$value",
+                            'type'     => 'string|int',
+                            'origin'   => 'Backed Enum Property',
                             'isMethod' => false,
-                            'source' => $targetFile,
-                            'line' => $targetLine,
+                            'source'   => $targetFile,
+                            'line'     => $targetLine,
                         ];
                     }
                     if ($memberName === 'name') {
                         return [
-                            'title' => "{$targetRef->getName()}::\$name",
-                            'type' => 'string',
-                            'origin' => 'Enum Case Name',
+                            'title'    => "{$targetRef->getName()}::\$name",
+                            'type'     => 'string',
+                            'origin'   => 'Enum Case Name',
                             'isMethod' => false,
-                            'source' => $targetFile,
-                            'line' => $targetLine,
+                            'source'   => $targetFile,
+                            'line'     => $targetLine,
                         ];
                     }
                 }
@@ -645,13 +675,14 @@ class BladeMemberHoverProvider implements HoverProvider
                                 }
                             }
                         }
+
                         return [
-                            'title' => "{$prop->getDeclaringClass()->getName()}::\${$memberName}",
-                            'type' => $pType,
-                            'origin' => 'Property (' . $prop->getDeclaringClass()->getShortName() . ')',
+                            'title'    => "{$prop->getDeclaringClass()->getName()}::\${$memberName}",
+                            'type'     => $pType,
+                            'origin'   => 'Property (' . $prop->getDeclaringClass()->getShortName() . ')',
                             'isMethod' => false,
-                            'source' => $relSource,
-                            'line' => $propLine,
+                            'source'   => $relSource,
+                            'line'     => $propLine,
                         ];
                     }
                 }
@@ -685,13 +716,13 @@ class BladeMemberHoverProvider implements HoverProvider
                         $sourceLine = $method->getStartLine() ?: $targetLine;
 
                         return [
-                            'title' => "{$method->getDeclaringClass()->getName()}::{$memberName}()",
-                            'type' => $returnType,
-                            'origin' => ($method->isStatic() ? 'Static Method (' : 'Method (') . $method->getDeclaringClass()->getShortName() . ')',
-                            'isMethod' => true,
+                            'title'     => "{$method->getDeclaringClass()->getName()}::{$memberName}()",
+                            'type'      => $returnType,
+                            'origin'    => ($method->isStatic() ? 'Static Method (' : 'Method (') . $method->getDeclaringClass()->getShortName() . ')',
+                            'isMethod'  => true,
                             'signature' => $paramSignature,
-                            'source' => $relSource,
-                            'line' => $sourceLine,
+                            'source'    => $relSource,
+                            'line'      => $sourceLine,
                         ];
                     }
                 }
@@ -707,18 +738,19 @@ class BladeMemberHoverProvider implements HoverProvider
                         $relSource = $source ? $this->relativePath($source) : $targetFile;
 
                         return [
-                            'title' => "{$targetRef->getName()}::{$memberName}",
-                            'type' => $cType,
-                            'origin' => $targetRef->isEnum() ? 'Enum Case' : 'Class Constant',
-                            'isMethod' => false,
+                            'title'         => "{$targetRef->getName()}::{$memberName}",
+                            'type'          => $cType,
+                            'origin'        => $targetRef->isEnum() ? 'Enum Case' : 'Class Constant',
+                            'isMethod'      => false,
                             'documentation' => "Constant value: `{$valStr}`",
-                            'source' => $relSource,
-                            'line' => $targetLine,
+                            'source'        => $relSource,
+                            'line'          => $targetLine,
                         ];
                     }
                 }
             }
-        } catch (Throwable) {}
+        } catch (Throwable) {
+        }
 
         return null;
     }
@@ -735,14 +767,15 @@ class BladeMemberHoverProvider implements HoverProvider
             if ($character >= $fullStart && $character <= $fullEnd) {
                 $rawClass = !empty($m[2][0]) ? $m[2][0] : trim(str_replace('::class', '', $m[1][0]));
                 $alias = !empty($m[3][0]) ? $m[3][0] : class_basename($rawClass);
+
                 return [
                     'contents' => [
-                        'kind' => 'markdown',
+                        'kind'  => 'markdown',
                         'value' => "### Blade Class Import\n\n```blade\n@use('{$rawClass}'" . ($alias !== class_basename($rawClass) ? ", '{$alias}'" : '') . ")\n```\n\nImports `{$rawClass}` into template scope as `{$alias}`.",
                     ],
                     'range' => [
                         'start' => ['line' => $lineNumber, 'character' => $fullStart],
-                        'end' => ['line' => $lineNumber, 'character' => $fullEnd],
+                        'end'   => ['line' => $lineNumber, 'character' => $fullEnd],
                     ],
                 ];
             }
@@ -755,34 +788,38 @@ class BladeMemberHoverProvider implements HoverProvider
                 $end = $start + strlen($fullMatch[0]);
                 if ($character >= $start && $character <= $end) {
                     $token = !empty($matches[1][$idx][0]) ? $matches[1][$idx][0] : $matches[2][$idx][0];
-                    if ($token === '') continue;
+                    if ($token === '') {
+                        continue;
+                    }
 
                     $importedUses = $this->bladeAnalyzer->extractUseDirectives($document->content);
                     if (isset($importedUses[$token])) {
                         $uInfo = $importedUses[$token];
+
                         return [
                             'contents' => [
-                                'kind' => 'markdown',
+                                'kind'  => 'markdown',
                                 'value' => "### Imported Class `{$token}`\n\n*Class:* `{$uInfo['class']}`\n*Imported on line:* {$uInfo['line']}\n\n```blade\n@use('{$uInfo['class']}', '{$token}')\n```",
                             ],
                             'range' => [
                                 'start' => ['line' => $lineNumber, 'character' => $start],
-                                'end' => ['line' => $lineNumber, 'character' => $end],
+                                'end'   => ['line' => $lineNumber, 'character' => $end],
                             ],
                         ];
                     }
 
-                    if (\App\Lsp\Features\Facades\FacadeMap::isFacadeOrAlias($token)) {
-                        $fqcn = \App\Lsp\Features\Facades\FacadeMap::resolve($token);
-                        $desc = \App\Lsp\Features\Facades\FacadeMap::description($token);
+                    if (FacadeMap::isFacadeOrAlias($token)) {
+                        $fqcn = FacadeMap::resolve($token);
+                        $desc = FacadeMap::description($token);
+
                         return [
                             'contents' => [
-                                'kind' => 'markdown',
+                                'kind'  => 'markdown',
                                 'value' => "### {$token} (Laravel Facade)\n\n*FQCN:* `{$fqcn}`\n\n{$desc}",
                             ],
                             'range' => [
                                 'start' => ['line' => $lineNumber, 'character' => $start],
-                                'end' => ['line' => $lineNumber, 'character' => $end],
+                                'end'   => ['line' => $lineNumber, 'character' => $end],
                             ],
                         ];
                     }
@@ -797,18 +834,19 @@ class BladeMemberHoverProvider implements HoverProvider
                 $fStart = $fMatch[1];
                 $fEnd = $fStart + strlen($fnName);
                 if ($character >= $fStart && $character <= $fEnd) {
-                    $fnRegistry = new \App\Lsp\Features\Functions\GlobalFunctionRegistry($this->project);
+                    $fnRegistry = new GlobalFunctionRegistry($this->project);
                     $fnInfo = $fnRegistry->get($fnName);
                     if ($fnInfo) {
                         $origin = isset($fnInfo['source']) ? 'User Defined Helper' : (str_contains($fnInfo['doc'] ?? '', 'Laravel') ? 'Laravel Helper' : 'Global Function');
+
                         return [
                             'contents' => [
-                                'kind' => 'markdown',
+                                'kind'  => 'markdown',
                                 'value' => "### `{$fnInfo['signature']}`\n\n{$fnInfo['doc']}\n\n*Origin:* `{$origin}`",
                             ],
                             'range' => [
                                 'start' => ['line' => $lineNumber, 'character' => $fStart],
-                                'end' => ['line' => $lineNumber, 'character' => $fEnd],
+                                'end'   => ['line' => $lineNumber, 'character' => $fEnd],
                             ],
                         ];
                     }
@@ -842,6 +880,7 @@ class BladeMemberHoverProvider implements HoverProvider
                         $itemType = $this->extractCollectionItemType($currentType);
                         if ($itemType !== null) {
                             $currentType = $itemType;
+
                             continue;
                         }
                     }
@@ -851,6 +890,7 @@ class BladeMemberHoverProvider implements HoverProvider
                 if (in_array($member, ['first', 'last', 'random', 'pop', 'shift', 'sole', 'value'], true)) {
                     if (preg_match('/(?:Collection|LengthAwarePaginator|Paginator)<(?:[^,]+,\s*)?([^>]+)>/', $currentType, $matchItem)) {
                         $currentType = trim($matchItem[1]);
+
                         continue;
                     }
                 }
@@ -862,10 +902,19 @@ class BladeMemberHoverProvider implements HoverProvider
 
                 $details = $this->resolveMemberDetails($currentType, $member, false, 'item');
                 if ($details && !empty($details['type'])) {
-                    $currentType = $details['type'];
+                    $ret = $details['type'];
+                    $cleanRet = ltrim(preg_replace('/\|null|\?/', '', $ret), '\\');
+                    if (in_array($cleanRet, ['static', '$this', 'self'], true)) {
+                        // Keep currentType
+                    } elseif ($ret !== '' && $ret !== 'mixed') {
+                        $currentType = $ret;
+                    } else {
+                        break;
+                    }
                 } else {
                     break;
                 }
+
             }
         }
 
@@ -913,7 +962,7 @@ class BladeMemberHoverProvider implements HoverProvider
     /**
      * Collect all variables available for the current view.
      *
-     * @param array<string, mixed>|null $position
+     * @param  array<string, mixed>|null  $position
      * @return array<string, array<string, mixed>>
      */
     protected function collectVariablesForView(Document $document, string $viewKey, ?array $position = null): array
@@ -936,12 +985,14 @@ class BladeMemberHoverProvider implements HoverProvider
             $views = $this->project->index->views();
             $matched = $views->first(function ($view) use ($path) {
                 $viewPath = str_replace('\\', '/', $view['path'] ?? '');
+
                 return $viewPath !== '' && str_ends_with($path, $viewPath);
             });
             if ($matched && !empty($matched['key'])) {
                 return $matched['key'];
             }
-        } catch (Throwable) {}
+        } catch (Throwable) {
+        }
 
         if (preg_match('/resources\/views\/vendor\/([^\/]+)\/(.+)\.blade\.php$/', $path, $matches)) {
             return "{$matches[1]}::" . str_replace('/', '.', $matches[2]);
@@ -989,7 +1040,8 @@ class BladeMemberHoverProvider implements HoverProvider
             try {
                 require_once $autoloader;
                 $this->autoloaderRegistered = true;
-            } catch (Throwable) {}
+            } catch (Throwable) {
+            }
         }
     }
 
@@ -1014,7 +1066,8 @@ class BladeMemberHoverProvider implements HoverProvider
         if (preg_match('/^([a-zA-Z0-9_\\\\]+)<(.+)>$/', $type, $m)) {
             $outer = $this->qualifyType($m[1], $document);
             $innerParts = array_map('trim', explode(',', $m[2]));
-            $qualifiedInners = array_map(fn($p) => $this->qualifyType($p, $document), $innerParts);
+            $qualifiedInners = array_map(fn ($p) => $this->qualifyType($p, $document), $innerParts);
+
             return $outer . '<' . implode(', ', $qualifiedInners) . '>';
         }
 
@@ -1024,7 +1077,8 @@ class BladeMemberHoverProvider implements HoverProvider
 
         if (str_contains($type, '|')) {
             $parts = explode('|', $type);
-            return implode('|', array_map(fn($p) => $this->qualifyType(trim($p), $document), $parts));
+
+            return implode('|', array_map(fn ($p) => $this->qualifyType(trim($p), $document), $parts));
         }
 
         $primitives = ['string', 'int', 'float', 'bool', 'array', 'object', 'callable', 'iterable', 'self', 'static', 'parent', 'true', 'false', 'never', 'stdClass'];
@@ -1038,13 +1092,14 @@ class BladeMemberHoverProvider implements HoverProvider
         }
 
         try {
-            $models = $this->project->index->models();
+            $models = $this->semanticIndex->models();
             foreach ($models as $fqcn => $mData) {
                 if (class_basename($fqcn) === $type) {
                     return '\\' . ltrim($fqcn, '\\');
                 }
             }
-        } catch (Throwable) {}
+        } catch (Throwable) {
+        }
 
         return $type;
     }

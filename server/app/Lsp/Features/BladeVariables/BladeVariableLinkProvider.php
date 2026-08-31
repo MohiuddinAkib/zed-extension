@@ -19,7 +19,7 @@ class BladeVariableLinkProvider implements LinkProvider
     public function __construct(
         protected Project $project,
     ) {
-        $this->bladeAnalyzer = new BladeAstAnalyzer();
+        $this->bladeAnalyzer = new BladeAstAnalyzer($this->project);
         $this->scopeResolver = new BladeScopeResolver($this->project, $this->bladeAnalyzer);
     }
 

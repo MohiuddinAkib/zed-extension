@@ -7,26 +7,54 @@ namespace App\Lsp\Features\BladeVariables;
 use App\Lsp\Analysis\BladeAstAnalyzer;
 use App\Lsp\Analysis\BladePhpAstAnalyzer;
 use App\Lsp\Analysis\BladeScopeResolver;
+use App\Lsp\Analysis\FunctionTypeResolver;
+use App\Lsp\Analysis\SemanticIndex;
 use App\Lsp\Contracts\LinkProvider;
 use App\Lsp\Document;
-use App\Lsp\Features\AppBindings\AppBindingContainerTypeMap;
+use App\Lsp\Features\Facades\FacadeMap;
+use App\Lsp\Features\Functions\GlobalFunctionRegistry;
 use App\Lsp\Project;
 use App\Lsp\Support\FileUri;
+use Illuminate\Container\Container;
 
 class BladeMemberLinkProvider implements LinkProvider
 {
     protected BladeAstAnalyzer $bladeAnalyzer;
+
     protected BladePhpAstAnalyzer $bladePhpAstAnalyzer;
+
     protected BladeScopeResolver $scopeResolver;
+
+    protected SemanticIndex $semanticIndex;
+
     protected BladeMemberHoverProvider $hoverHelper;
+
+    protected FunctionTypeResolver $functionTypeResolver;
+
+    protected bool $autoloaderRegistered = false;
 
     public function __construct(
         protected Project $project,
+        ?SemanticIndex $semanticIndex = null,
+        ?FunctionTypeResolver $functionTypeResolver = null,
     ) {
-        $this->bladeAnalyzer = new BladeAstAnalyzer();
-        $this->bladePhpAstAnalyzer = new BladePhpAstAnalyzer();
+        $this->semanticIndex = $semanticIndex ?? $this->resolveSemanticIndex();
+        $this->functionTypeResolver = $functionTypeResolver ?? new FunctionTypeResolver($this->project, semanticIndex: $this->semanticIndex);
+        $this->bladeAnalyzer = new BladeAstAnalyzer($this->project, $this->functionTypeResolver);
+        $this->bladePhpAstAnalyzer = new BladePhpAstAnalyzer;
         $this->scopeResolver = new BladeScopeResolver($this->project, $this->bladeAnalyzer);
-        $this->hoverHelper = new BladeMemberHoverProvider($this->project);
+        $this->hoverHelper = new BladeMemberHoverProvider($this->project, $this->semanticIndex, $this->functionTypeResolver);
+    }
+
+    protected function resolveSemanticIndex(): SemanticIndex
+    {
+        $container = Container::getInstance();
+
+        if ($container->bound(SemanticIndex::class)) {
+            return $container->make(SemanticIndex::class);
+        }
+
+        return new SemanticIndex($this->project);
     }
 
     /**
@@ -69,22 +97,17 @@ class BladeMemberLinkProvider implements LinkProvider
                 $importedUses = $this->bladeAnalyzer->extractUseDirectives($document->content);
                 if (isset($importedUses[$rootClass])) {
                     $rootType = $importedUses[$rootClass]['class'];
-                } elseif (\App\Lsp\Features\Facades\FacadeMap::isFacadeOrAlias($rootClass)) {
-                    $rootType = \App\Lsp\Features\Facades\FacadeMap::resolve($rootClass);
-                    $accessorType = \App\Lsp\Features\Facades\FacadeMap::resolveAccessor($rootClass);
+                } elseif (FacadeMap::isFacadeOrAlias($rootClass)) {
+                    $rootType = FacadeMap::resolve($rootClass);
+                    $accessorType = FacadeMap::resolveAccessor($rootClass);
                 } else {
                     $rootType = '\\' . ltrim($rootClass, '\\');
                 }
             } elseif ($rootCall !== null) {
-                $rootType = match ($rootCall) {
-                    'app', 'resolve' => $rootCallArg ? AppBindingContainerTypeMap::resolveType($rootCallArg) : '\Illuminate\Foundation\Application',
-                    'auth' => '\Illuminate\Auth\AuthManager',
-                    'request' => '\Illuminate\Http\Request',
-                    'session' => '\Illuminate\Session\SessionManager',
-                    'now', 'today' => '\Illuminate\Support\Carbon',
-                    default => null,
-                };
+                $argCount = trim($rootCallArg ?? '') === '' ? 0 : 1;
+                $rootType = $this->functionTypeResolver->resolve($rootCall, $rootCallArg, $document, $argCount);
             } elseif ($varName !== '' && isset($variables[$varName])) {
+
                 $rootType = $variables[$varName]['type'] ?? 'mixed';
                 $rootType = $this->hoverHelper->qualifyType($rootType, $document);
                 $varSource = $variables[$varName]['source'] ?? null;
@@ -137,9 +160,9 @@ class BladeMemberLinkProvider implements LinkProvider
                     $links[] = [
                         'range' => [
                             'start' => ['line' => $expr['startLine'], 'character' => $expr['startCol']],
-                            'end' => ['line' => $expr['startLine'], 'character' => $expr['endCol']],
+                            'end'   => ['line' => $expr['startLine'], 'character' => $expr['endCol']],
                         ],
-                        'target' => "{$targetUri}#L{$targetLine}",
+                        'target'  => "{$targetUri}#L{$targetLine}",
                         'tooltip' => "Go to definition: {$source}:{$targetLine}",
                     ];
                 }
@@ -161,9 +184,9 @@ class BladeMemberLinkProvider implements LinkProvider
                     $links[] = [
                         'range' => [
                             'start' => ['line' => $lineIdx, 'character' => $startCol],
-                            'end' => ['line' => $lineIdx, 'character' => $endCol],
+                            'end'   => ['line' => $lineIdx, 'character' => $endCol],
                         ],
-                        'target' => (string) FileUri::fromPath($classFile),
+                        'target'  => (string) FileUri::fromPath($classFile),
                         'tooltip' => "Go to {$clean}",
                     ];
                 }
@@ -171,7 +194,7 @@ class BladeMemberLinkProvider implements LinkProvider
         }
 
         // 3. Add links for global & custom helper functions (e.g. custom_helper())
-        $functionRegistry = new \App\Lsp\Features\Functions\GlobalFunctionRegistry($this->project);
+        $functionRegistry = new GlobalFunctionRegistry($this->project);
         foreach ($expressions as $expr) {
             if ($expr['rootCall'] !== null && $expr['rootCall'] !== 'class') {
                 $fnName = $expr['rootCall'];
@@ -188,9 +211,9 @@ class BladeMemberLinkProvider implements LinkProvider
                             $links[] = [
                                 'range' => [
                                     'start' => ['line' => $lineIdx, 'character' => $startCol],
-                                    'end' => ['line' => $lineIdx, 'character' => $endCol],
+                                    'end'   => ['line' => $lineIdx, 'character' => $endCol],
                                 ],
-                                'target' => "{$targetUri}#L{$fnLine}",
+                                'target'  => "{$targetUri}#L{$fnLine}",
                                 'tooltip' => "Go to function {$fnName}()",
                             ];
                         }
@@ -226,7 +249,7 @@ class BladeMemberLinkProvider implements LinkProvider
     /**
      * Collect all variables available for the current view.
      *
-     * @param array<string, mixed>|null $position
+     * @param  array<string, mixed>|null  $position
      * @return array<string, array<string, mixed>>
      */
     protected function collectVariablesForView(Document $document, string $viewKey, ?array $position = null): array
@@ -263,12 +286,14 @@ class BladeMemberLinkProvider implements LinkProvider
             $views = $this->project->index->views();
             $matched = $views->first(function ($view) use ($path) {
                 $viewPath = str_replace('\\', '/', $view['path'] ?? '');
+
                 return $viewPath !== '' && str_ends_with($path, $viewPath);
             });
             if ($matched && !empty($matched['key'])) {
                 return $matched['key'];
             }
-        } catch (\Throwable) {}
+        } catch (\Throwable) {
+        }
 
         if (preg_match('/resources\/views\/vendor\/([^\/]+)\/(.+)\.blade\.php$/', $path, $matches)) {
             return "{$matches[1]}::" . str_replace('/', '.', $matches[2]);
@@ -330,7 +355,8 @@ class BladeMemberLinkProvider implements LinkProvider
                     return $fn;
                 }
             }
-        } catch (\Throwable) {}
+        } catch (\Throwable) {
+        }
 
         return null;
     }
@@ -342,7 +368,8 @@ class BladeMemberLinkProvider implements LinkProvider
         if (file_exists($autoloadPath)) {
             try {
                 @include_once $autoloadPath;
-            } catch (\Throwable) {}
+            } catch (\Throwable) {
+            }
         }
     }
 }
