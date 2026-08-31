@@ -39,7 +39,7 @@ class ComponentRegistry
     {
         $this->phpParser = (new ParserFactory())->createForNewestSupportedVersion();
         $this->nodeFinder = new NodeFinder();
-        $this->bladeAnalyzer = new BladeAstAnalyzer();
+        $this->bladeAnalyzer = new BladeAstAnalyzer($this->project);
         $this->docBlockParser = new DocBlockParser();
     }
 
@@ -463,9 +463,12 @@ class ComponentRegistry
         try {
             $rawComponents = $this->project->index->bladeComponents()['components'] ?? [];
             foreach ($rawComponents as $key => $data) {
-                if (!is_array($data) || isset($this->components[$key])) {
+                if (!is_array($data)) {
                     continue;
                 }
+
+                $keyStr = (string) $key;
+                $existing = $this->components[$keyStr] ?? null;
 
                 $props = [];
                 if (isset($data['props']) && is_array($data['props'])) {
@@ -487,20 +490,63 @@ class ComponentRegistry
                     }
                 }
 
-                $symbol = new ComponentSymbol(
-                    name: (string) $key,
-                    tagName: 'x-' . $key,
-                    isAnonymous: empty($data['class']),
-                    className: $data['class'] ?? null,
-                    viewPath: $data['paths'][0] ?? null,
-                    props: $props,
-                    slots: [
-                        'slot' => new SlotSymbol('slot', [], 'Default slot content'),
-                    ],
-                    documentation: "Blade component: <x-{$key}>",
-                );
+                $slots = [
+                    'slot' => new SlotSymbol('slot', [], 'Default slot content'),
+                ];
 
-                $this->components[$key] = $symbol;
+                $viewPath = $data['paths'][0] ?? null;
+                if (is_string($viewPath) && $viewPath !== '') {
+                    $basePath = rtrim($this->project->path(), '/\\');
+                    $fullPath = str_starts_with($viewPath, '/') ? $viewPath : $basePath . '/' . ltrim($viewPath, '/\\');
+                    if (file_exists($fullPath) && str_ends_with($fullPath, '.blade.php')) {
+                        try {
+                            $content = (string) file_get_contents($fullPath);
+                            $extractedProps = $this->extractPropsFromBlade($content, $fullPath);
+                            $props = array_merge($extractedProps, $props);
+                            $extractedSlots = $this->extractSlotsFromBlade($content);
+                            $slots = array_merge($slots, $extractedSlots);
+                        } catch (Throwable) {}
+                    }
+                }
+
+                if ($existing !== null) {
+                    $mergedProps = array_merge($props, $existing->props);
+                    $mergedSlots = array_merge($slots, $existing->slots);
+                    $symbol = new ComponentSymbol(
+                        name: $existing->name,
+                        tagName: $existing->tagName,
+                        isAnonymous: $existing->isAnonymous,
+                        className: $existing->className,
+                        viewPath: $existing->viewPath ?? $viewPath,
+                        props: $mergedProps,
+                        slots: $mergedSlots,
+                        documentation: $existing->documentation,
+                    );
+                } else {
+                    $symbol = new ComponentSymbol(
+                        name: $keyStr,
+                        tagName: 'x-' . $keyStr,
+                        isAnonymous: empty($data['class']),
+                        className: $data['class'] ?? null,
+                        viewPath: $viewPath,
+                        props: $props,
+                        slots: $slots,
+                        documentation: "Blade component: <x-{$keyStr}>",
+                    );
+                }
+
+                $this->components[$keyStr] = $symbol;
+                $this->components['x-' . $keyStr] = $symbol;
+
+                if (str_contains($keyStr, '::')) {
+                    [$ns, $namePart] = explode('::', $keyStr, 2);
+                    $kebabVariant = $ns . '::' . str_replace('.', '-', $namePart);
+                    $dotVariant = $ns . '::' . str_replace('-', '.', $namePart);
+                    $this->components[$kebabVariant] = $symbol;
+                    $this->components[$dotVariant] = $symbol;
+                    $this->components['x-' . $kebabVariant] = $symbol;
+                    $this->components['x-' . $dotVariant] = $symbol;
+                }
             }
         } catch (Throwable) {}
     }

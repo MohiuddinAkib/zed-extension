@@ -58,6 +58,8 @@ class BladeComponents implements DataProvider
         return [
             '**/{resources,Modules/*/resources}/views/**/*.blade.php',
             'app/View/Components/{,*,**/*}.php',
+            'composer.lock',
+            'vendor/composer/autoload_psr4.php',
         ];
     }
 }

@@ -71,31 +71,50 @@ $components = new class
             return [];
         }
 
-        $files = Finder::create()
-            ->files()
-            ->name('*.' . $extension)
-            ->in($path);
+        try {
+            $files = Finder::create()
+                ->files()
+                ->name('*.' . $extension)
+                ->in($path);
+        } catch (Throwable) {
+            return [];
+        }
+
         $components = [];
-        $pathRealPath = realpath($path);
+        $pathRealPath = realpath($path) ?: $path;
 
         foreach ($files as $file) {
-            $realPath = $file->getRealPath();
+            try {
+                $realPath = $file->getRealPath() ?: $file->getPathname();
 
-            $key = str($realPath)
-                ->replace($pathRealPath, '')
-                ->ltrim('/\\')
-                ->replace('.' . $extension, '')
-                ->replace(['/', '\\'], '.')
-                ->pipe(fn ($str) => $this->handleIndexComponents($str));
+                $key = str($realPath)
+                    ->replace($pathRealPath, '')
+                    ->ltrim('/\\')
+                    ->replace('.' . $extension, '')
+                    ->replace(['/', '\\'], '.')
+                    ->pipe(fn ($str) => $this->handleIndexComponents($str));
 
-            $components[] = [
-                'path'     => LspHelper::relativePath($realPath),
-                'isVendor' => LspHelper::isVendor($realPath),
-                'key'      => $keyCallback ? $keyCallback($key) : $key,
-            ];
+                $res = $keyCallback ? $keyCallback($key) : $key;
+                $keys = is_array($res) || $res instanceof \Illuminate\Support\Collection ? $res : [$res];
+
+                foreach ($keys as $k) {
+                    $components[] = [
+                        'path'     => LspHelper::relativePath($realPath),
+                        'isVendor' => LspHelper::isVendor($realPath),
+                        'key'      => (string) $k,
+                    ];
+                }
+            } catch (Throwable) {}
         }
 
         return $components;
+    }
+
+    protected function formatKeySegments($str): string
+    {
+        return collect(explode('.', (string) $str))
+            ->map(fn ($p) => Str::kebab($p))
+            ->implode('.');
     }
 
     protected function getStandardClasses()
@@ -110,9 +129,7 @@ $components = new class
         return collect($this->findFiles(
             $path,
             'php',
-            fn ($key) => $key->explode('.')
-                ->map(fn ($p) => Str::kebab($p))
-                ->implode('.'),
+            fn ($key) => $this->formatKeySegments($key),
         ))->map(function ($item) use ($appNamespace) {
             $class = str($item['path'])
                 ->after('View/Components/')
@@ -176,10 +193,22 @@ $components = new class
         $components = [];
 
         foreach (Blade::getAnonymousComponentNamespaces() as $key => $dir) {
-            $path = collect([$dir, resource_path('views/' . $dir)])->first(fn ($p) => is_dir($p));
+            $candidates = [
+                $dir,
+                resource_path('views/' . $dir),
+                resource_path($dir),
+                base_path($dir),
+                resource_path('views/' . str_replace('.', '/', $dir)),
+                resource_path(str_replace('.', '/', $dir)),
+            ];
+            $path = collect($candidates)->first(fn ($p) => is_string($p) && is_dir($p));
 
             if (!$path) {
                 continue;
+            }
+
+            if (!in_array($key, $this->prefixes, true)) {
+                $this->prefixes[] = $key;
             }
 
             array_push(
@@ -187,7 +216,7 @@ $components = new class
                 ...$this->findFiles(
                     $path,
                     'blade.php',
-                    fn ($k) => $k->kebab()->prepend($key . '::'),
+                    fn ($k) => $key . '::' . $this->formatKeySegments($k),
                 )
             );
         }
@@ -200,30 +229,39 @@ $components = new class
         $components = [];
 
         foreach (Blade::getAnonymousComponentPaths() as $item) {
+            $path = $item['path'] ?? null;
+            if (!$path || !is_dir($path)) {
+                continue;
+            }
+
+            $prefix = $item['prefix'] ?? '';
+            if ($prefix !== '' && !in_array($prefix, $this->prefixes, true)) {
+                $this->prefixes[] = $prefix;
+            }
+
             array_push(
                 $components,
                 ...$this->findFiles(
-                    $item['path'],
+                    $path,
                     'blade.php',
-                    function (Stringable $key) use ($item) {
-                        $prefix = $item['prefix'] ? $item['prefix'] . '::' : '';
-                        $key = $key->kebab();
+                    function (Stringable $key) use ($prefix) {
+                        $keyFormatted = $this->formatKeySegments($key);
                         $keys = [];
 
-                        $keys[] = $key->prepend($prefix);
+                        if ($prefix !== '') {
+                            $keys[] = "{$prefix}::{$keyFormatted}";
 
-                        if ($item['prefix'] === 'flux') {
-                            $keys[] = $key->prepend('flux:');
+                            if ($prefix === 'flux') {
+                                $keys[] = "flux:{$keyFormatted}";
+                            }
+                        } else {
+                            $keys[] = $keyFormatted;
                         }
 
                         return $keys;
                     },
                 )
             );
-
-            if (!in_array($item['prefix'], $this->prefixes)) {
-                $this->prefixes[] = $item['prefix'];
-            }
         }
 
         return $components;
@@ -233,31 +271,70 @@ $components = new class
     {
         $components = [];
 
-        /** @var Factory $view */
-        $view = App::make('view');
+        try {
+            /** @var Factory $view */
+            $view = App::make('view');
 
-        /** @var FileViewFinder $finder */
-        $finder = $view->getFinder();
+            /** @var FileViewFinder $finder */
+            $finder = $view->getFinder();
 
-        /** @var array<string, array<int, string>> $views */
-        $views = $finder->getHints();
+            /** @var array<string, array<int, string>> $views */
+            $views = $finder->getHints();
+        } catch (Throwable) {
+            return [];
+        }
 
         foreach ($views as $key => $paths) {
-            foreach ($paths as $path) {
-                $path .= '/components';
+            if (!in_array($key, $this->prefixes, true)) {
+                $this->prefixes[] = $key;
+            }
 
-                if (!is_dir($path)) {
+            foreach ((array) $paths as $path) {
+                if (!is_string($path) || !is_dir($path)) {
                     continue;
                 }
 
-                array_push(
-                    $components,
-                    ...$this->findFiles(
-                        $path,
-                        'blade.php',
-                        fn (Stringable $k) => $k->kebab()->prepend($key . '::'),
-                    )
-                );
+                $scannedSub = false;
+
+                // Check /components subdirectory
+                $compPath = rtrim($path, '/\\') . '/components';
+                if (is_dir($compPath)) {
+                    $scannedSub = true;
+                    array_push(
+                        $components,
+                        ...$this->findFiles(
+                            $compPath,
+                            'blade.php',
+                            fn (Stringable $k) => $key . '::' . $this->formatKeySegments($k),
+                        )
+                    );
+                }
+
+                // Check /html subdirectory (e.g. Mail markdown components)
+                $htmlPath = rtrim($path, '/\\') . '/html';
+                if (is_dir($htmlPath)) {
+                    $scannedSub = true;
+                    array_push(
+                        $components,
+                        ...$this->findFiles(
+                            $htmlPath,
+                            'blade.php',
+                            fn (Stringable $k) => $key . '::' . $this->formatKeySegments($k),
+                        )
+                    );
+                }
+
+                // If neither /components nor /html exists, scan the hint root directory directly
+                if (!$scannedSub) {
+                    array_push(
+                        $components,
+                        ...$this->findFiles(
+                            $path,
+                            'blade.php',
+                            fn (Stringable $k) => $key . '::' . $this->formatKeySegments($k),
+                        )
+                    );
+                }
             }
         }
 

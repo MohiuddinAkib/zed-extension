@@ -273,23 +273,30 @@ class BladeComponentDocumentMapper
             }
         }
 
+        $prefixLower = strtolower($prefix);
+        $prefixLength = Utf16Position::length($prefix);
+
         return collect(array_keys($allComponents))
             ->filter(fn (mixed $key): bool => is_string($key) && $key !== '')
-            ->map(fn (string $key): array => [
-                'label'    => $this->completionLabel($key),
-                'kind'     => 7, // Class / Component
-                'textEdit' => [
+            ->map(fn (string $key): string => $this->completionLabel($key))
+            ->unique()
+            ->filter(fn (string $label): bool => str_starts_with(strtolower($label), $prefixLower))
+            ->map(fn (string $label): array => [
+                'label'      => $label,
+                'kind'       => 7, // Class / Component
+                'filterText' => $label,
+                'textEdit'   => [
                     'range'   => [
                         'start' => [
                             'line'      => $position['line'],
-                            'character' => $position['character'] - strlen($prefix),
+                            'character' => $position['character'] - $prefixLength,
                         ],
                         'end' => [
                             'line'      => $position['line'],
                             'character' => $position['character'],
                         ],
                     ],
-                    'newText' => $this->completionLabel($key),
+                    'newText' => $label,
                 ],
             ])
             ->values()
@@ -359,11 +366,27 @@ class BladeComponentDocumentMapper
             return null;
         }
 
-        $line = explode("\n", $document->content)[$lineNumber] ?? '';
-        $linePrefix = substr($line, 0, $character);
+        $lines = explode("\n", $document->content);
+        $line = $lines[$lineNumber] ?? '';
+        $linePrefix = Utf16Position::substr($line, 0, $character);
 
-        return $this->componentPrefixes()
-            ->first(fn (string $prefix): bool => str_ends_with($linePrefix, $prefix));
+        if (!preg_match('/(?<!\/)<([a-zA-Z0-9_.:-]+)$/', $linePrefix, $matches)) {
+            return null;
+        }
+
+        $token = $matches[1];
+
+        $componentPrefixes = $this->componentPrefixes();
+        $isPrefixMatch = $componentPrefixes->contains(function (string $prefix) use ($token): bool {
+            return str_starts_with(strtolower($token), strtolower($prefix))
+                || str_starts_with(strtolower($prefix), strtolower($token));
+        });
+
+        if (!$isPrefixMatch) {
+            return null;
+        }
+
+        return $token;
     }
 
     /**
@@ -387,6 +410,10 @@ class BladeComponentDocumentMapper
      */
     protected function completionLabel(string $key): string
     {
+        if (str_starts_with($key, 'x-')) {
+            return $key;
+        }
+
         if (str_contains($key, '::') || !str_contains($key, ':')) {
             return "x-{$key}";
         }
