@@ -14,6 +14,7 @@ use App\Lsp\Data\Controllers;
 use App\Lsp\Data\CustomBladeDirectives;
 use App\Lsp\Data\DebugInfo;
 use App\Lsp\Data\Env;
+use App\Lsp\Data\Helpers;
 use App\Lsp\Data\InertiaViews;
 use App\Lsp\Data\Middleware;
 use App\Lsp\Data\MixManifest;
@@ -22,6 +23,7 @@ use App\Lsp\Data\Paths;
 use App\Lsp\Data\Routes;
 use App\Lsp\Data\Tests;
 use App\Lsp\Data\Translations;
+use App\Lsp\Data\ValidationRules;
 use App\Lsp\Data\Views;
 use App\Lsp\Data\ViewVariables;
 use App\Lsp\Exceptions\DataProviderNotFoundException;
@@ -37,25 +39,27 @@ class ProjectIndex
      * @var array<string, class-string<DataProvider>>
      */
     protected array $providers = [
-        'appBindings' => AppBindings::class,
-        'assets' => Assets::class,
-        'auth' => Auth::class,
-        'bladeComponents' => BladeComponents::class,
-        'configs' => Configs::class,
-        'controllers' => Controllers::class,
+        'appBindings'           => AppBindings::class,
+        'assets'                => Assets::class,
+        'auth'                  => Auth::class,
+        'bladeComponents'       => BladeComponents::class,
+        'configs'               => Configs::class,
+        'controllers'           => Controllers::class,
         'customBladeDirectives' => CustomBladeDirectives::class,
-        'debugInfo' => DebugInfo::class,
-        'env' => Env::class,
-        'inertiaViews' => InertiaViews::class,
-        'middleware' => Middleware::class,
-        'mixManifest' => MixManifest::class,
-        'models' => Models::class,
-        'paths' => Paths::class,
-        'routes' => Routes::class,
-        'tests' => Tests::class,
-        'translations' => Translations::class,
-        'views' => Views::class,
-        'viewVariables' => ViewVariables::class,
+        'debugInfo'             => DebugInfo::class,
+        'env'                   => Env::class,
+        'helpers'               => Helpers::class,
+        'inertiaViews'          => InertiaViews::class,
+        'middleware'            => Middleware::class,
+        'mixManifest'           => MixManifest::class,
+        'models'                => Models::class,
+        'paths'                 => Paths::class,
+        'routes'                => Routes::class,
+        'tests'                 => Tests::class,
+        'translations'          => Translations::class,
+        'validationRules'       => ValidationRules::class,
+        'views'                 => Views::class,
+        'viewVariables'         => ViewVariables::class,
     ];
 
     /**
@@ -146,6 +150,14 @@ class ProjectIndex
     }
 
     /**
+     * Get reflected helper functions.
+     */
+    public function helpers(): array
+    {
+        return $this->get(__FUNCTION__);
+    }
+
+    /**
      * Get the inertia views provider.
      */
     public function inertiaViews(): array
@@ -174,7 +186,27 @@ class ProjectIndex
      */
     public function models(): array
     {
-        return $this->get(__FUNCTION__);
+        $metadata = $this->get(__FUNCTION__);
+
+        if (is_array($metadata) && isset($metadata['models']) && is_array($metadata['models'])) {
+            return $metadata['models'];
+        }
+
+        return is_array($metadata) ? $metadata : [];
+    }
+
+    /**
+     * Get reflected Eloquent builder methods from the models provider.
+     */
+    public function builderMethods(): array
+    {
+        $metadata = $this->get('models');
+
+        if (is_array($metadata) && isset($metadata['builderMethods']) && is_array($metadata['builderMethods'])) {
+            return $metadata['builderMethods'];
+        }
+
+        return [];
     }
 
     /**
@@ -205,6 +237,14 @@ class ProjectIndex
      * Get the translations provider.
      */
     public function translations(): array
+    {
+        return $this->get(__FUNCTION__);
+    }
+
+    /**
+     * Get reflected validation rules.
+     */
+    public function validationRules(): array
     {
         return $this->get(__FUNCTION__);
     }
@@ -256,7 +296,7 @@ class ProjectIndex
      */
     protected function load(string $name): mixed
     {
-        if (! isset($this->providers[$name])) {
+        if (!isset($this->providers[$name])) {
             throw new DataProviderNotFoundException($name);
         }
 

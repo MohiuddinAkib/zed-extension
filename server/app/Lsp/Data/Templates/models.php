@@ -67,10 +67,43 @@ $models = new class($factory)
 
     public function all()
     {
-        if (File::isDirectory(base_path('app/Models'))) {
-            collect(File::allFiles(base_path('app/Models')))
-                ->filter(fn (SplFileInfo $file) => $file->getExtension() === 'php')
-                ->each(fn ($file) => include_once ($file));
+        $directoriesToScan = [
+            base_path('app/Models'),
+            base_path('app'),
+            base_path('src'),
+            base_path('Domain'),
+            base_path('modules'),
+        ];
+
+        if (File::exists(base_path('composer.json'))) {
+            try {
+                $composer = json_decode(File::get(base_path('composer.json')), true);
+                $autoloadPsr4 = array_merge(
+                    $composer['autoload']['psr-4'] ?? [],
+                    $composer['autoload-dev']['psr-4'] ?? []
+                );
+                foreach ($autoloadPsr4 as $namespace => $paths) {
+                    $paths = is_array($paths) ? $paths : [$paths];
+                    foreach ($paths as $path) {
+                        $fullPath = base_path($path);
+                        if (!in_array($fullPath, $directoriesToScan, true)) {
+                            $directoriesToScan[] = $fullPath;
+                        }
+                    }
+                }
+            } catch (Throwable) {}
+        }
+
+        foreach ($directoriesToScan as $dir) {
+            if (File::isDirectory($dir)) {
+                collect(File::allFiles($dir))
+                    ->filter(fn (SplFileInfo $file) => $file->getExtension() === 'php')
+                    ->each(function (SplFileInfo $file) {
+                        try {
+                            include_once ($file->getRealPath());
+                        } catch (Throwable) {}
+                    });
+            }
         }
 
         return collect(get_declared_classes())
@@ -189,6 +222,15 @@ $models = new class($factory)
 
         $data['path'] = LspHelper::relativePath($reflection->getFileName() ?: '');
 
+        $customBuilder = null;
+        if ($reflection->hasMethod('newEloquentBuilder')) {
+            $neb = $reflection->getMethod('newEloquentBuilder');
+            if ($neb->hasReturnType()) {
+                $customBuilder = (string) $neb->getReturnType();
+            }
+        }
+        $data['custom_builder'] = $customBuilder ? Str::start(ltrim($customBuilder, '?\\'), '\\') : null;
+
         return [
             $className => $data,
         ];
@@ -279,24 +321,109 @@ $builder = new class($docblocks)
 
     public function methods()
     {
-        $reflection = new ReflectionClass(Builder::class);
+        $classes = [
+            \Illuminate\Database\Eloquent\Builder::class,
+            \Illuminate\Database\Query\Builder::class,
+        ];
 
-        return collect($reflection->getMethods(ReflectionMethod::IS_PUBLIC | ReflectionMethod::IS_PROTECTED))
-            ->filter(fn (ReflectionMethod $method) => !str_starts_with($method->getName(), '__') || (!$method->isPublic() && empty($method->getAttributes(Scope::class))))
-            ->map(fn (ReflectionMethod $method) => $this->getMethodInfo($method))
-            ->filter()
-            ->values();
+        $seen = [];
+        $methods = [];
+
+        foreach ($classes as $cls) {
+            if (!class_exists($cls)) {
+                continue;
+            }
+            $reflection = new ReflectionClass($cls);
+            foreach ($reflection->getMethods(ReflectionMethod::IS_PUBLIC | ReflectionMethod::IS_PROTECTED) as $method) {
+                $name = $method->getName();
+                if (isset($seen[$name]) || str_starts_with($name, '__') || $name === '__call') {
+                    continue;
+                }
+                $seen[$name] = true;
+                $info = $this->getMethodInfo($method);
+                if ($info) {
+                    $methods[] = $info;
+                }
+            }
+        }
+
+        return $methods;
     }
 
     protected function getMethodInfo($method)
     {
-        [$params, $return] = $this->docblocks->forMethod($method);
+        [$docParams, $return] = $this->docblocks->forMethod($method);
+        $docParamTypes = collect($docParams)
+            ->mapWithKeys(function (string $param): array {
+                if (preg_match('/^(.+?)\s+\$?([a-zA-Z_][a-zA-Z0-9_]*)$/', trim($param), $matches)) {
+                    return [$matches[2] => trim($matches[1])];
+                }
+
+                return [];
+            });
+
+        $parameters = collect($method->getParameters())
+            ->map(function (ReflectionParameter $parameter) use ($docParamTypes): array {
+                $result = [
+                    'name'                => $parameter->getName(),
+                    'type'                => $docParamTypes->get($parameter->getName(), $this->typeToString($parameter->getType())),
+                    'hasDefault'          => $parameter->isDefaultValueAvailable(),
+                    'isVariadic'          => $parameter->isVariadic(),
+                    'isPassedByReference' => $parameter->isPassedByReference(),
+                ];
+
+                if ($parameter->isDefaultValueAvailable()) {
+                    $result['default'] = $this->defaultValueToString($parameter);
+                }
+
+                return $result;
+            })
+            ->values();
 
         return [
             'name'       => $method->getName(),
-            'parameters' => $params,
-            'return'     => $return,
+            'parameters' => $parameters,
+            'return'     => $return ?: $this->typeToString($method->getReturnType()),
         ];
+    }
+
+    protected function typeToString(?ReflectionType $type): string
+    {
+        return match (true) {
+            $type instanceof ReflectionNamedType        => $this->namedTypeToString($type),
+            $type instanceof ReflectionUnionType        => implode('|', array_map($this->typeToString(...), $type->getTypes())),
+            $type instanceof ReflectionIntersectionType => implode('&', array_map($this->typeToString(...), $type->getTypes())),
+            default                                     => 'mixed',
+        };
+    }
+
+    protected function namedTypeToString(ReflectionNamedType $type): string
+    {
+        $name = $type->getName();
+
+        if (!$type->isBuiltin() && !in_array($name, ['self', 'parent', 'static'], true)) {
+            $name = '\\' . $name;
+        }
+
+        return $type->allowsNull() && $name !== 'mixed' && $name !== 'null' ? '?' . $name : $name;
+    }
+
+    protected function defaultValueToString(ReflectionParameter $param): string
+    {
+        if ($param->isDefaultValueConstant()) {
+            return '\\' . $param->getDefaultValueConstantName();
+        }
+
+        $value = $param->getDefaultValue();
+
+        return match (true) {
+            is_null($value)    => 'null',
+            is_numeric($value) => (string) $value,
+            is_bool($value)    => $value ? 'true' : 'false',
+            is_array($value)   => '[]',
+            is_object($value)  => 'new \\' . get_class($value),
+            default            => "'{$value}'",
+        };
     }
 };
 

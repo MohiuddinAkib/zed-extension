@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Lsp;
 
+use App\Lsp\Support\Utf16Position;
 use App\Parser\DetectWalker;
 use App\Parser\Walker;
 use Illuminate\Support\Collection;
@@ -89,7 +90,7 @@ class Document
             return '';
         }
 
-        return substr(
+        return Utf16Position::substr(
             explode("\n", $this->content)[$line] ?? '',
             $character,
             $endCharacter - $character,
@@ -113,7 +114,7 @@ class Document
         $lines = explode("\n", $this->content);
         $before = array_slice($lines, 0, $line);
         $current = $lines[$line] ?? '';
-        $before[] = substr($current, 0, $character);
+        $before[] = Utf16Position::substr($current, 0, $character);
 
         return implode("\n", $before);
     }

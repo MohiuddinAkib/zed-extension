@@ -115,8 +115,20 @@ class PestHelperWatcher implements FileWatcher
     {
         $options = $this->project->all();
         $relativePath = $options['pestHelperFilePath'] ?? 'storage/framework/testing/_pest.php';
+        $path = is_string($relativePath) ? $relativePath : 'storage/framework/testing/_pest.php';
 
-        return $this->project->path(is_string($relativePath) ? $relativePath : 'storage/framework/testing/_pest.php');
+        if (str_contains($path, '..') || str_starts_with($path, '/') || str_starts_with($path, '\\') || preg_match('/^[a-zA-Z]:/', $path)) {
+            return $this->project->path('storage/framework/testing/_pest.php');
+        }
+
+        $fullPath = $this->project->path($path);
+        $projectPath = rtrim($this->project->path(), DIRECTORY_SEPARATOR);
+
+        if (!str_starts_with($fullPath, $projectPath . DIRECTORY_SEPARATOR) && $fullPath !== $projectPath) {
+            return $this->project->path('storage/framework/testing/_pest.php');
+        }
+
+        return $fullPath;
     }
 
     /**

@@ -34,7 +34,7 @@ class ViewVariables implements DataProvider
     public function __construct(protected Project $project)
     {
         $this->phpAnalyzer = new PhpAstViewAnalyzer();
-        $this->bladeAnalyzer = new BladeAstAnalyzer();
+        $this->bladeAnalyzer = new BladeAstAnalyzer($this->project);
     }
 
     /**

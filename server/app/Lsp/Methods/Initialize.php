@@ -79,6 +79,7 @@ final class Initialize implements Method
                     'codeActionKinds' => ['quickfix'],
                 ],
                 'definitionProvider' => $project->boolean('definitionProvider', true),
+                'referencesProvider' => true,
                 'hoverProvider'      => true,
                 'signatureHelpProvider' => [
                     'triggerCharacters' => ['(', ','],

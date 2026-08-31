@@ -40,7 +40,7 @@ class BladeDocumentCompiler
         $virtualBuffer .= \App\Lsp\Features\Facades\FacadeMap::defaultUseStatements() . "\n\n";
 
         // 2. Inject template @use(...) directives
-        $bladeAstAnalyzer = new BladeAstAnalyzer();
+        $bladeAstAnalyzer = new BladeAstAnalyzer($this->project);
         $importedUses = $bladeAstAnalyzer->extractUseDirectives($bladeContent);
         foreach ($importedUses as $alias => $uInfo) {
             $classFqcn = ltrim($uInfo['class'], '\\');

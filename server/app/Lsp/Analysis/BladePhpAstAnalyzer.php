@@ -90,9 +90,11 @@ class BladePhpAstAnalyzer
                         ? $directive->arguments->position->startOffset + 1
                         : $directive->position->startOffset + strlen((string) $directive->content) + 2;
                     $startByte = strlen(mb_substr($content, 0, $startChar));
+                    $isGuarded = in_array((string) $directive->content, ['isset', 'empty'], true);
                     $snippets[] = [
                         'code' => $args,
                         'offset' => $startByte,
+                        'isGuarded' => $isGuarded,
                     ];
                 }
             }
@@ -148,7 +150,7 @@ class BladePhpAstAnalyzer
                     continue;
                 }
 
-                $this->traverseAndCollectAstNodes($stmts, $baseOffset, $content, $lineOffsets, $expressions);
+                $this->traverseAndCollectAstNodes($stmts, $baseOffset, $content, $lineOffsets, $expressions, $s['isGuarded'] ?? false);
             }
         } catch (Throwable) {
             // Silently fallback if blade syntax is mid-edit
@@ -187,8 +189,102 @@ class BladePhpAstAnalyzer
         int $baseOffset,
         string $fullContent,
         array $lineOffsets,
-        array &$results
+        array &$results,
+        bool $snippetGuarded = false
     ): void {
+        $guardedVarNodes = new \SplObjectStorage();
+        $assignmentVarNodes = new \SplObjectStorage();
+        $closureParamVarNodes = new \SplObjectStorage();
+
+        // 1. Isset, Empty, and Coalesce guards
+        $issetNodes = $this->nodeFinder->find($stmts, function (Node $node) {
+            return $node instanceof \PhpParser\Node\Expr\Isset_
+                || $node instanceof \PhpParser\Node\Expr\Empty_
+                || $node instanceof \PhpParser\Node\Expr\BinaryOp\Coalesce;
+        });
+
+        foreach ($issetNodes as $guardNode) {
+            $target = $guardNode instanceof \PhpParser\Node\Expr\BinaryOp\Coalesce ? $guardNode->left : $guardNode;
+            $innerVars = $this->nodeFinder->find($target, function (Node $node) {
+                return $node instanceof Variable;
+            });
+            foreach ($innerVars as $iv) {
+                $guardedVarNodes->attach($iv);
+            }
+        }
+
+        // 2. Assignment targets & Catch blocks
+        $assignNodes = $this->nodeFinder->find($stmts, function (Node $node) {
+            return $node instanceof \PhpParser\Node\Expr\Assign
+                || $node instanceof \PhpParser\Node\Expr\AssignRef
+                || $node instanceof \PhpParser\Node\Stmt\Catch_
+                || $node instanceof \PhpParser\Node\Stmt\Foreach_;
+        });
+
+        foreach ($assignNodes as $an) {
+            if ($an instanceof \PhpParser\Node\Expr\Assign || $an instanceof \PhpParser\Node\Expr\AssignRef) {
+                if ($an->var instanceof Variable) {
+                    $assignmentVarNodes->attach($an->var);
+                }
+            } elseif ($an instanceof \PhpParser\Node\Stmt\Catch_) {
+                if ($an->var instanceof Variable && is_string($an->var->name)) {
+                    $assignmentVarNodes->attach($an->var);
+                    $catchVarName = $an->var->name;
+                    $bodyVars = $this->nodeFinder->find($an->stmts, function (Node $node) {
+                        return $node instanceof Variable;
+                    });
+                    foreach ($bodyVars as $bv) {
+                        if (is_string($bv->name) && $bv->name === $catchVarName) {
+                            $closureParamVarNodes->attach($bv);
+                        }
+                    }
+                }
+            } elseif ($an instanceof \PhpParser\Node\Stmt\Foreach_) {
+                if ($an->valueVar instanceof Variable) {
+                    $assignmentVarNodes->attach($an->valueVar);
+                }
+                if ($an->keyVar instanceof Variable) {
+                    $assignmentVarNodes->attach($an->keyVar);
+                }
+            }
+        }
+
+        // 3. Arrow functions and Closures
+        $closures = $this->nodeFinder->find($stmts, function (Node $node) {
+            return $node instanceof \PhpParser\Node\Expr\ArrowFunction
+                || $node instanceof \PhpParser\Node\Expr\Closure;
+        });
+
+        foreach ($closures as $closure) {
+            $paramNames = [];
+            foreach ($closure->params as $param) {
+                if ($param->var instanceof Variable && is_string($param->var->name)) {
+                    $assignmentVarNodes->attach($param->var);
+                    $paramNames[$param->var->name] = true;
+                }
+            }
+            if ($closure instanceof \PhpParser\Node\Expr\Closure) {
+                foreach ($closure->uses as $use) {
+                    if ($use->var instanceof Variable && is_string($use->var->name)) {
+                        $paramNames[$use->var->name] = true;
+                    }
+                }
+            }
+
+            if (!empty($paramNames)) {
+                $bodyExpr = $closure instanceof \PhpParser\Node\Expr\ArrowFunction ? $closure->expr : $closure->stmts;
+                $bodyVars = $this->nodeFinder->find($bodyExpr, function (Node $node) {
+                    return $node instanceof Variable;
+                });
+                foreach ($bodyVars as $bv) {
+                    if (is_string($bv->name) && isset($paramNames[$bv->name])) {
+                        $closureParamVarNodes->attach($bv);
+                    }
+                }
+            }
+        }
+
+
         $nodes = $this->nodeFinder->find($stmts, function (Node $node) {
             return $node instanceof PropertyFetch
                 || $node instanceof NullsafePropertyFetch
@@ -269,6 +365,10 @@ class BladePhpAstAnalyzer
             $loc = $this->offsetToLineAndCol($startOffset, $lineOffsets, $fullContent);
             $endLoc = $this->offsetToLineAndCol($endOffset, $lineOffsets, $fullContent);
 
+            $isGuardedNode = $snippetGuarded || ($node instanceof Variable && $guardedVarNodes->contains($node));
+            $isAssignmentNode = $node instanceof Variable && $assignmentVarNodes->contains($node);
+            $isClosureParamNode = $node instanceof Variable && $closureParamVarNodes->contains($node);
+
             $results[] = [
                 'kind' => $kind,
                 'name' => $name,
@@ -284,8 +384,12 @@ class BladePhpAstAnalyzer
                 'isMethod' => $isMethod,
                 'isArrayAccess' => $isArrayAccess,
                 'argCount' => property_exists($node, 'args') && is_array($node->args) ? count($node->args) : null,
+                'isGuarded' => $isGuardedNode,
+                'isAssignment' => $isAssignmentNode,
+                'isClosureParam' => $isClosureParamNode,
             ];
         }
+
     }
 
     /**
@@ -298,6 +402,7 @@ class BladePhpAstAnalyzer
         $rootVar = null;
         $rootCall = null;
         $rootCallArg = null;
+        $rootCallArgCount = null;
         $segments = [];
 
         $current = $node;
@@ -318,6 +423,7 @@ class BladePhpAstAnalyzer
         } elseif ($current instanceof FuncCall) {
             if ($current->name instanceof Name) {
                 $rootCall = $current->name->toString();
+                $rootCallArgCount = count($current->args);
                 if (!empty($current->args) && isset($current->args[0])) {
                     $arg = $current->args[0];
                     $argVal = $arg instanceof Arg ? $arg->value : null;
@@ -325,6 +431,8 @@ class BladePhpAstAnalyzer
                         $rootCallArg = $argVal->value;
                     } elseif ($argVal instanceof ClassConstFetch && $argVal->class instanceof Name) {
                         $rootCallArg = $argVal->class->toString();
+                    } else {
+                        $rootCallArg = '$dynamic';
                     }
                 }
             }
@@ -365,6 +473,7 @@ class BladePhpAstAnalyzer
                 break;
             } elseif ($current instanceof FuncCall && $current->name instanceof Name) {
                 $rootCall = $current->name->toString();
+                $rootCallArgCount = count($current->args);
                 if (!empty($current->args) && isset($current->args[0])) {
                     $arg = $current->args[0];
                     $argVal = $arg instanceof Arg ? $arg->value : null;
@@ -372,6 +481,8 @@ class BladePhpAstAnalyzer
                         $rootCallArg = $argVal->value;
                     } elseif ($argVal instanceof ClassConstFetch && $argVal->class instanceof Name) {
                         $rootCallArg = $argVal->class->toString();
+                    } else {
+                        $rootCallArg = '$dynamic';
                     }
                 }
                 break;
@@ -384,6 +495,7 @@ class BladePhpAstAnalyzer
             'rootVar' => $rootVar,
             'rootCall' => $rootCall,
             'rootCallArg' => $rootCallArg,
+            'rootCallArgCount' => $rootCallArgCount,
             'chain' => implode('', $segments),
         ];
     }

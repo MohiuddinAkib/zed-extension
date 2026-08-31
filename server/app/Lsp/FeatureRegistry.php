@@ -4,12 +4,20 @@ declare(strict_types=1);
 
 namespace App\Lsp;
 
+use App\Lsp\Analysis\BladeAstAnalyzer;
+use App\Lsp\Analysis\BladeDocumentCompiler;
+use App\Lsp\Analysis\BladeScopeResolver;
+use App\Lsp\Analysis\ComponentRegistry;
+use App\Lsp\Analysis\DefaultPhpIntelligenceAdapter;
+use App\Lsp\Analysis\FunctionTypeResolver;
+use App\Lsp\Analysis\SemanticIndex;
 use App\Lsp\Contracts\CodeActionProvider;
 use App\Lsp\Contracts\CompletionProvider;
 use App\Lsp\Contracts\DiagnosticProvider;
 use App\Lsp\Contracts\FileWatcher;
 use App\Lsp\Contracts\HoverProvider;
 use App\Lsp\Contracts\LinkProvider;
+use App\Lsp\Contracts\PhpIntelligenceAdapter;
 use App\Lsp\Features\AppBindings\AppBindingCompletionProvider;
 use App\Lsp\Features\AppBindings\AppBindingDiagnosticProvider;
 use App\Lsp\Features\AppBindings\AppBindingHoverProvider;
@@ -21,13 +29,16 @@ use App\Lsp\Features\Auth\AuthCompletionProvider;
 use App\Lsp\Features\Auth\AuthDiagnosticProvider;
 use App\Lsp\Features\Auth\AuthHoverProvider;
 use App\Lsp\Features\Auth\AuthLinkProvider;
+use App\Lsp\Features\Attributes\AttributeCompletionProvider;
 use App\Lsp\Features\BladeComponents\BladeComponentCompletionProvider;
 use App\Lsp\Features\BladeComponents\BladeComponentHoverProvider;
 use App\Lsp\Features\BladeComponents\BladeComponentLinkProvider;
 use App\Lsp\Features\BladeDirectives\BladeDirectiveCompletionProvider;
 use App\Lsp\Features\BladeDirectives\BladeDirectiveHoverProvider;
+use App\Lsp\Features\BladePhp\BladePhpDiagnosticProvider;
 use App\Lsp\Features\BladePhp\BladePhpHoverProvider;
 use App\Lsp\Features\BladePhp\BladePhpLinkProvider;
+use App\Lsp\Features\BladePhp\BladeSemanticDiagnosticAnalyzer;
 use App\Lsp\Features\BladeVariables\BladeMemberCompletionProvider;
 use App\Lsp\Features\BladeVariables\BladeMemberHoverProvider;
 use App\Lsp\Features\BladeVariables\BladeMemberLinkProvider;
@@ -41,6 +52,7 @@ use App\Lsp\Features\Configs\ConfigLinkProvider;
 use App\Lsp\Features\ControllerActions\ControllerActionCompletionProvider;
 use App\Lsp\Features\ControllerActions\ControllerActionDiagnosticProvider;
 use App\Lsp\Features\ControllerActions\ControllerActionLinkProvider;
+use App\Lsp\Features\DataPaths\DataPathCompletionProvider;
 use App\Lsp\Features\Eloquent\EloquentCompletionProvider;
 use App\Lsp\Features\Env\EnvCodeActionProvider;
 use App\Lsp\Features\Env\EnvCompletionProvider;
@@ -149,6 +161,8 @@ class FeatureRegistry
      * @var array<int, class-string<CompletionProvider>>
      */
     public array $completions = [
+        AttributeCompletionProvider::class,
+        DataPathCompletionProvider::class,
         BladeMemberCompletionProvider::class,
         BladeComponentCompletionProvider::class,
         BladeDirectiveCompletionProvider::class,
@@ -195,8 +209,8 @@ class FeatureRegistry
         StorageDiagnosticProvider::class,
         TranslationDiagnosticProvider::class,
         ViewDiagnosticProvider::class,
-        \App\Lsp\Features\BladePhp\BladePhpDiagnosticProvider::class,
-        \App\Lsp\Features\BladePhp\BladeSemanticDiagnosticAnalyzer::class,
+        BladePhpDiagnosticProvider::class,
+        BladeSemanticDiagnosticAnalyzer::class,
     ];
 
     /**
@@ -225,9 +239,33 @@ class FeatureRegistry
      */
     public function __construct(protected Container $container)
     {
-        if (!$this->container->bound(\App\Lsp\Analysis\ComponentRegistry::class)) {
-            $this->container->singleton(\App\Lsp\Analysis\ComponentRegistry::class, function () {
-                return new \App\Lsp\Analysis\ComponentRegistry($this->container->make(Project::class));
+        if (!$this->container->bound(ComponentRegistry::class)) {
+            $this->container->singleton(ComponentRegistry::class, function () {
+                return new ComponentRegistry($this->container->make(Project::class));
+            });
+        }
+
+        if (!$this->container->bound(SemanticIndex::class)) {
+            $this->container->singleton(SemanticIndex::class, function () {
+                return new SemanticIndex($this->container->make(Project::class));
+            });
+        }
+
+        if (!$this->container->bound(FunctionTypeResolver::class)) {
+            $this->container->singleton(FunctionTypeResolver::class, function () {
+                $project = $this->container->bound(Project::class) ? $this->container->make(Project::class) : null;
+                $semanticIndex = $this->container->bound(SemanticIndex::class) ? $this->container->make(SemanticIndex::class) : null;
+
+                return new FunctionTypeResolver($project, semanticIndex: $semanticIndex);
+            });
+        }
+
+        if (!$this->container->bound(BladeAstAnalyzer::class)) {
+            $this->container->singleton(BladeAstAnalyzer::class, function () {
+                $project = $this->container->bound(Project::class) ? $this->container->make(Project::class) : null;
+                $resolver = $this->container->bound(FunctionTypeResolver::class) ? $this->container->make(FunctionTypeResolver::class) : null;
+
+                return new BladeAstAnalyzer($project, $resolver);
             });
         }
     }
@@ -295,35 +333,35 @@ class FeatureRegistry
     /**
      * Resolve the active PHP intelligence adapter.
      */
-    public function phpIntelligence(): \App\Lsp\Contracts\PhpIntelligenceAdapter
+    public function phpIntelligence(): PhpIntelligenceAdapter
     {
-        if ($this->container->bound(\App\Lsp\Contracts\PhpIntelligenceAdapter::class)) {
-            return $this->container->make(\App\Lsp\Contracts\PhpIntelligenceAdapter::class);
+        if ($this->container->bound(PhpIntelligenceAdapter::class)) {
+            return $this->container->make(PhpIntelligenceAdapter::class);
         }
 
-        return $this->container->make(\App\Lsp\Analysis\DefaultPhpIntelligenceAdapter::class);
+        return $this->container->make(DefaultPhpIntelligenceAdapter::class);
     }
 
     /**
      * Resolve the Blade document compiler.
      */
-    public function bladeCompiler(): \App\Lsp\Analysis\BladeDocumentCompiler
+    public function bladeCompiler(): BladeDocumentCompiler
     {
-        return $this->container->make(\App\Lsp\Analysis\BladeDocumentCompiler::class);
+        return $this->container->make(BladeDocumentCompiler::class);
     }
 
     /**
      * Resolve the Blade scope resolver.
      */
-    public function scopeResolver(): \App\Lsp\Analysis\BladeScopeResolver
+    public function scopeResolver(): BladeScopeResolver
     {
-        return $this->container->make(\App\Lsp\Analysis\BladeScopeResolver::class);
+        return $this->container->make(BladeScopeResolver::class);
     }
 
     /**
      * Resolve given classes from the container.
      *
-     * @param array<int, class-string> $classes
+     * @param  array<int, class-string>  $classes
      * @return array<int, mixed>
      */
     protected function resolve(array $classes): array

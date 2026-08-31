@@ -46,4 +46,12 @@ interface PhpIntelligenceAdapter
      * @return list<array<string, mixed>>
      */
     public function diagnostics(VirtualDocument $document): array;
+
+    /**
+     * Provide references for a position inside a virtual PHP document.
+     *
+     * @param  array{line: int, character: int}  $position
+     * @return list<array<string, mixed>>
+     */
+    public function references(VirtualDocument $document, array $position, bool $includeDeclaration = true): array;
 }

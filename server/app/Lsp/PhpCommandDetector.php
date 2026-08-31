@@ -26,34 +26,13 @@ class PhpCommandDetector
      */
     public function detect(): array
     {
-        return match ($this->environment) {
-            'herd'  => $this->herd(),
-            'valet' => $this->valet(),
-            'sail'  => $this->sail(),
-            'lando' => $this->lando(),
-            'ddev'  => $this->ddev(),
-            'local' => $this->local(),
-            'auto'  => $this->auto(),
-            default => ['php'],
-        };
-    }
+        $resolver = new \App\Lsp\Runtime\PhpRuntimeResolver(
+            $this->path,
+            $this->environment,
+            $this->exceptions
+        );
 
-    /**
-     * Auto-detect the PHP command.
-     *
-     * @return string[]
-     */
-    protected function auto(): array
-    {
-        foreach (['herd', 'valet', 'sail', 'lando', 'ddev', 'local'] as $environment) {
-            $command = $this->{$environment}();
-
-            if ($command !== ['php']) {
-                return $command;
-            }
-        }
-
-        return ['php'];
+        return $resolver->resolve()['command'];
     }
 
     /**

@@ -61,6 +61,7 @@ final class Server
         'textDocument/documentLink'  => TextDocumentDocumentLink::class,
         'textDocument/hover'         => TextDocumentHover::class,
         'textDocument/prepareRename' => TextDocumentPrepareRename::class,
+        'textDocument/references'    => \App\Lsp\Methods\TextDocumentReferences::class,
         'textDocument/rename'        => TextDocumentRename::class,
         'textDocument/signatureHelp' => \App\Lsp\Methods\TextDocumentSignatureHelp::class,
     ];

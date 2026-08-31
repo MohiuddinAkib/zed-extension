@@ -29,19 +29,23 @@ class Models implements DataProvider
      * Parse the raw model data.
      *
      * @param  array<string, mixed>  $data
-     * @return array<string, array<string, mixed>>
+     * @return array{models: array<string, array<string, mixed>>, builderMethods: array<int, array<string, mixed>>}
      */
     public function parse(array $data): array
     {
         $models = $data['models'] ?? [];
+        $builderMethods = $data['builderMethods'] ?? [];
 
-        return is_array($models) ? $models : [];
+        return [
+            'models'         => is_array($models) ? $models : [],
+            'builderMethods' => is_array($builderMethods) ? $builderMethods : [],
+        ];
     }
 
     /**
      * Get data.
      *
-     * @return array<string, array<string, mixed>>
+     * @return array{models: array<string, array<string, mixed>>, builderMethods: array<int, array<string, mixed>>}
      */
     public function get(): array
     {

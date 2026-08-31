@@ -59,7 +59,7 @@ class ScriptRunner
                 'tinker',
                 '--execute',
                 'require ' . var_export($script, true) . ';',
-            ], $this->path, timeout: null);
+            ], $this->path, timeout: 5.0);
 
             $process->run();
 

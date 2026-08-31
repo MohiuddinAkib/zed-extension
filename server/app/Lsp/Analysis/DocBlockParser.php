@@ -323,4 +323,25 @@ class DocBlockParser
 
         return null;
     }
+
+    /**
+     * Extract the @return tag type string from a docblock comment.
+     */
+    public function extractReturnTag(string $comment): ?string
+    {
+        $docNode = $this->parseDocBlock($comment);
+        if (!$docNode) {
+            return null;
+        }
+
+        $returnTags = $docNode->getReturnTagValues();
+        if (!empty($returnTags)) {
+            $type = (string) $returnTags[0]->type;
+
+            return $type !== '' ? $type : null;
+        }
+
+        return null;
+    }
 }
+

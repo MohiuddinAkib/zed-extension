@@ -59,6 +59,14 @@ final class ViewScope
         }
     }
 
+    public function hasVariable(string $name): bool
+    {
+        $clean = ltrim($name, '$');
+
+        return isset($this->variables[$clean]);
+    }
+
+
     /**
      * @param  array<string, array<string, mixed>>  $variables
      * @param  list<string>  $sources
