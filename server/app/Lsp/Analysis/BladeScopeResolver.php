@@ -140,8 +140,8 @@ class BladeScopeResolver
         // 3. Template-level symbols filtered by line availability
         $relSource = $this->relativePath($document->uri);
         foreach ($this->bladeAnalyzer->extractTemplateSymbols($document->content, $relSource) as $symbol) {
-            // @php local assignments are only visible from their declaration line onwards
-            if ($symbol->origin->name === '@php' && $symbol->range !== null) {
+            // @php and <?php local assignments are only visible from their declaration line onwards
+            if (in_array($symbol->origin->name, ['@php', '<?php'], true) && $symbol->range !== null) {
                 if ($bladeLineIndex < $symbol->range->startLine) {
                     continue;
                 }

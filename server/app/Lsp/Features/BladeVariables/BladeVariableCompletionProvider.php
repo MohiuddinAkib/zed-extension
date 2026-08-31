@@ -195,7 +195,7 @@ class BladeVariableCompletionProvider implements CompletionProvider
                 'range' => $range,
                 'newText' => $name,
             ],
-            'sortText' => (str_starts_with($origin, '@') ? '0_' : ($origin === 'Global' ? '2_' : '1_')) . $name,
+            'sortText' => (str_starts_with($origin, '@') || str_starts_with($origin, '<') ? '0_' : ($origin === 'Global' ? '2_' : '1_')) . $name,
         ];
     }
 

@@ -99,7 +99,14 @@ class BladeAstAnalyzer
 
             foreach ($doc->getPhpBlocks() as $phpBlock) {
                 $line = $phpBlock->position ? $phpBlock->position->startLine : 1;
-                foreach ($this->parsePhpBlockSymbols((string) $phpBlock->innerContent, $source, $line) as $name => $symbol) {
+                foreach ($this->parsePhpBlockSymbols((string) $phpBlock->innerContent, $source, $line, '@php') as $name => $symbol) {
+                    $symbols[$name] = $symbol;
+                }
+            }
+
+            foreach ($doc->getPhpTags() as $phpTag) {
+                $line = $phpTag->position ? $phpTag->position->startLine : 1;
+                foreach ($this->parsePhpBlockSymbols((string) $phpTag->innerContent, $source, $line, '<' . '?php') as $name => $symbol) {
                     $symbols[$name] = $symbol;
                 }
             }
@@ -109,6 +116,33 @@ class BladeAstAnalyzer
             }
         } catch (Throwable) {
             // Blade can be syntactically incomplete while the user is typing.
+        }
+
+        // Fallback for raw PHP tags and @php blocks during active editing
+        if (preg_match_all('/<\?(?:php|=)?\s*([\s\S]*?)\?\x3E/i', $content, $phpTagMatches, PREG_OFFSET_CAPTURE)) {
+            foreach ($phpTagMatches[1] as $match) {
+                $code = $match[0];
+                $offset = $match[1];
+                $line = substr_count(substr($content, 0, $offset), "\n") + 1;
+                foreach ($this->parsePhpBlockSymbols($code, $source, $line, '<' . '?php') as $name => $symbol) {
+                    if (!isset($symbols[$name])) {
+                        $symbols[$name] = $symbol;
+                    }
+                }
+            }
+        }
+
+        if (preg_match_all('/@php\s*([\s\S]*?)@endphp/i', $content, $phpBlockMatches, PREG_OFFSET_CAPTURE)) {
+            foreach ($phpBlockMatches[1] as $match) {
+                $code = $match[0];
+                $offset = $match[1];
+                $line = substr_count(substr($content, 0, $offset), "\n") + 1;
+                foreach ($this->parsePhpBlockSymbols($code, $source, $line, '@php') as $name => $symbol) {
+                    if (!isset($symbols[$name])) {
+                        $symbols[$name] = $symbol;
+                    }
+                }
+            }
         }
 
         return $symbols;
@@ -372,7 +406,7 @@ class BladeAstAnalyzer
     /**
      * @return array<string, VariableSymbol>
      */
-    protected function parsePhpBlockSymbols(string $code, ?string $source, int $startLine): array
+    protected function parsePhpBlockSymbols(string $code, ?string $source, int $startLine, string $originName = '@php'): array
     {
         $symbols = [];
         $stmts = $this->parsePhpStatements($code);
@@ -388,12 +422,22 @@ class BladeAstAnalyzer
                 continue;
             }
 
+            $docType = null;
+            if ($docComment = $assignment->getDocComment()) {
+                $vars = $this->docBlockParser->extractVarTags($docComment->getText());
+                if (isset($vars[$assignment->var->name])) {
+                    $docType = $this->cleanDocType($vars[$assignment->var->name]);
+                }
+            }
+
             $line = $this->lineForPhpNode($code, $assignment, $startLine);
+            $typeStr = $docType ?? $this->inferTypeFromExprNode($assignment->expr);
+
             $symbols[$assignment->var->name] = new VariableSymbol(
                 name: $assignment->var->name,
-                type: TypeRef::fromString($this->inferTypeFromExprNode($assignment->expr)),
-                origin: new ScopeOrigin('@php', $source, $line, 'Locally defined @php variable'),
-                detail: 'Locally defined @php variable',
+                type: TypeRef::fromString($typeStr),
+                origin: new ScopeOrigin($originName, $source, $line, "Locally defined {$originName} variable"),
+                detail: "Locally defined {$originName} variable",
                 range: SourceRange::line($line),
             );
         }
@@ -582,6 +626,18 @@ class BladeAstAnalyzer
         if ($expr instanceof ClassConstFetch && $expr->name instanceof Identifier && strtolower($expr->name->name) === 'class') {
             $class = $expr->class instanceof Name ? '\\' . ltrim($expr->class->toString(), '\\') : 'object';
             return "class-string<{$class}>";
+        }
+
+        if ($expr instanceof \PhpParser\Node\Expr\StaticCall && $expr->class instanceof Name && $expr->name instanceof Identifier) {
+            $className = '\\' . ltrim($expr->class->toString(), '\\');
+            $methodName = $expr->name->toString();
+            if (in_array($methodName, ['all', 'get', 'paginate', 'cursor', 'lazy'], true)) {
+                return "\\Illuminate\\Database\\Eloquent\\Collection<int, {$className}>";
+            }
+            if (in_array($methodName, ['find', 'findOrFail', 'first', 'firstOrFail', 'create', 'make', 'query'], true)) {
+                return $className;
+            }
+            return $className;
         }
 
         if ($expr instanceof FuncCall && $expr->name instanceof Name) {
