@@ -46,14 +46,20 @@ class TextDocumentCompletion implements Method
             return JsonRpcResponse::result($request->id(), []);
         }
 
+        $aggregatedItems = [];
+        $seenKeys = [];
+
         foreach ($this->features->completions() as $provider) {
             $items = $provider->get($document, $position);
 
-            if ($items !== []) {
-                return JsonRpcResponse::result(
-                    $request->id(),
-                    CompletionItems::matching($document, $items),
-                );
+            foreach ($items as $item) {
+                $label = is_array($item) ? ($item['label'] ?? '') : (string) $item;
+                $insertText = is_array($item) ? ($item['insertText'] ?? $label) : $label;
+                $key = $label . '|' . $insertText;
+                if (!isset($seenKeys[$key])) {
+                    $seenKeys[$key] = true;
+                    $aggregatedItems[] = $item;
+                }
             }
 
             $request->cancelIfRequested();
@@ -66,14 +72,24 @@ class TextDocumentCompletion implements Method
                 $virtualPos = $virtualDoc->sourceMap->bladeToVirtualPosition((int) $position['line'], (int) $position['character']);
                 if ($virtualPos !== null) {
                     $phpItems = $this->features->phpIntelligence()->completion($virtualDoc, $virtualPos);
-                    if (!empty($phpItems)) {
-                        return JsonRpcResponse::result(
-                            $request->id(),
-                            CompletionItems::matching($document, $phpItems),
-                        );
+                    foreach ($phpItems as $phpItem) {
+                        $label = is_array($phpItem) ? ($phpItem['label'] ?? '') : (string) $phpItem;
+                        $insertText = is_array($phpItem) ? ($phpItem['insertText'] ?? $label) : $label;
+                        $key = $label . '|' . $insertText;
+                        if (!isset($seenKeys[$key])) {
+                            $seenKeys[$key] = true;
+                            $aggregatedItems[] = $phpItem;
+                        }
                     }
                 }
             } catch (\Throwable) {}
+        }
+
+        if (!empty($aggregatedItems)) {
+            return JsonRpcResponse::result(
+                $request->id(),
+                CompletionItems::matching($document, $aggregatedItems),
+            );
         }
 
         return JsonRpcResponse::result($request->id(), []);
