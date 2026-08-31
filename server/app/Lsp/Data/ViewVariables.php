@@ -101,7 +101,8 @@ class ViewVariables implements DataProvider
     public function patterns(): array
     {
         return [
-            '**/{app/Http/Controllers,routes,app/View/Components,app/Mail,app/Notifications,app/Livewire,app/Http/Livewire,app/Filament,Modules}/**/*.php',
+            '**/{app/Http/Controllers,routes,app/Providers,app/View,app/Mail,app/Notifications,app/Livewire,app/Http/Livewire,app/Http/Middleware,app/Filament,Modules}/**/*.php',
+            '**/bootstrap/{app,providers}.php',
             '**/resources/views/**/*.blade.php',
         ];
     }
@@ -159,11 +160,13 @@ class ViewVariables implements DataProvider
         $searchDirs = [
             $basePath . '/app/Http/Controllers',
             $basePath . '/routes',
+            $basePath . '/app/Providers',
+            $basePath . '/app/View',
             $basePath . '/app/Mail',
             $basePath . '/app/Notifications',
-            $basePath . '/app/View/Components',
             $basePath . '/app/Livewire',
             $basePath . '/app/Http/Livewire',
+            $basePath . '/app/Http/Middleware',
             $basePath . '/app/Filament',
             $basePath . '/app/Filament/Resources',
             $basePath . '/app/Filament/Pages',
@@ -175,7 +178,14 @@ class ViewVariables implements DataProvider
             $searchDirs[] = $basePath . '/Modules';
         }
 
+        $singleFiles = [
+            $basePath . '/bootstrap/app.php',
+            $basePath . '/bootstrap/providers.php',
+        ];
+
         $seenFiles = [];
+        $composerBindings = [];
+        $composerClasses = [];
 
         foreach ($searchDirs as $dir) {
             if (!is_dir($dir)) {
@@ -199,7 +209,7 @@ class ViewVariables implements DataProvider
                         }
 
                         $relPath = $this->relativePath($realPath);
-                        $extractedViews = $this->phpAnalyzer->analyze($code, $relPath);
+                        $extractedViews = $this->phpAnalyzer->analyze($code, $relPath, $composerBindings, $composerClasses);
                         $this->phpFileCache[$realPath] = [
                             'mtime' => $mtime,
                             'views' => $extractedViews,
@@ -211,6 +221,47 @@ class ViewVariables implements DataProvider
                     }
                 }
             } catch (Throwable) {}
+        }
+
+        foreach ($singleFiles as $singlePath) {
+            if (!file_exists($singlePath)) {
+                continue;
+            }
+
+            try {
+                $realPath = realpath($singlePath) ?: $singlePath;
+                $seenFiles[$realPath] = true;
+                $mtime = @filemtime($realPath) ?: 0;
+
+                if (isset($this->phpFileCache[$realPath]) && $this->phpFileCache[$realPath]['mtime'] === $mtime) {
+                    $extractedViews = $this->phpFileCache[$realPath]['views'];
+                } else {
+                    $code = @file_get_contents($realPath);
+                    if (!$code) {
+                        continue;
+                    }
+
+                    $relPath = $this->relativePath($realPath);
+                    $extractedViews = $this->phpAnalyzer->analyze($code, $relPath, $composerBindings, $composerClasses);
+                    $this->phpFileCache[$realPath] = [
+                        'mtime' => $mtime,
+                        'views' => $extractedViews,
+                    ];
+                }
+
+                foreach ($extractedViews as $viewName => $viewData) {
+                    $this->mergeViewData($views, $viewName, $viewData['variables'], $viewData['sources']);
+                }
+            } catch (Throwable) {}
+        }
+
+        // Merge any cross-file composer class bindings
+        foreach ($composerBindings as $class => $targetViews) {
+            if (isset($composerClasses[$class])) {
+                foreach ($targetViews as $targetView) {
+                    $this->mergeViewData($views, $targetView, $composerClasses[$class]);
+                }
+            }
         }
 
         // Clean up deleted files from cache

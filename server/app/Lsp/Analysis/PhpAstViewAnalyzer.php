@@ -49,9 +49,11 @@ class PhpAstViewAnalyzer
     /**
      * Analyze PHP source code and extract all view calls and their passed variables.
      *
+     * @param array<string, list<string>> $composerBindings
+     * @param array<string, list<array<string, mixed>>> $composerClasses
      * @return array<string, array{key: string, variables: array<string, array<string, mixed>>, sources: array<int, string>}>
      */
-    public function analyze(string $code, string $filePath = ''): array
+    public function analyze(string $code, string $filePath = '', array &$composerBindings = [], array &$composerClasses = []): array
     {
         try {
             $stmts = $this->parser->parse($code);
@@ -63,7 +65,7 @@ class PhpAstViewAnalyzer
         }
 
         $views = [];
-        $visitor = new class($views, $filePath) extends NodeVisitorAbstract {
+        $visitor = new class($views, $filePath, $composerBindings, $composerClasses) extends NodeVisitorAbstract {
             /** @var array<string, string> */
             protected array $useAliases = [];
 
@@ -73,6 +75,7 @@ class PhpAstViewAnalyzer
             /** @var array<string, array<string, mixed>> */
             protected array $currentClassProperties = [];
 
+            protected string $currentNamespace = '';
             protected ?string $currentClass = null;
             protected ?string $currentExtends = null;
             protected ?string $currentMethod = null;
@@ -86,10 +89,16 @@ class PhpAstViewAnalyzer
             public function __construct(
                 public array &$views,
                 public string $filePath,
+                public array &$composerBindings,
+                public array &$composerClasses,
             ) {}
 
             public function enterNode(Node $node)
             {
+                if ($node instanceof Node\Stmt\Namespace_) {
+                    $this->currentNamespace = $node->name?->toString() ?? '';
+                }
+
                 if ($node instanceof Use_) {
                     foreach ($node->uses as $use) {
                         $alias = $use->getAlias()->toString();
@@ -98,7 +107,8 @@ class PhpAstViewAnalyzer
                 }
 
                 if ($node instanceof Class_) {
-                    $this->currentClass = $node->name?->toString();
+                    $shortName = $node->name?->toString() ?? '';
+                    $this->currentClass = $this->currentNamespace !== '' ? "{$this->currentNamespace}\\{$shortName}" : $shortName;
                     $this->currentExtends = $node->extends?->toString();
                     $this->currentClassProperties = [];
 
@@ -244,11 +254,39 @@ class PhpAstViewAnalyzer
                     ];
                 }
 
-                // 4. Match view() function calls, View::make(), new Content(...), or custom @view-string methods
+                // 4. Match class-based composer / creator methods: compose(View $view) / create(View $view)
+                if ($node instanceof ClassMethod && in_array($node->name->toString(), ['compose', 'create'], true)) {
+                    if ($node->stmts !== null && $this->currentClass !== null) {
+                        $methodVars = $this->extractVariablesFromMethodStmts($node->stmts);
+                        if (!empty($methodVars)) {
+                            $fullClass = $this->currentClass;
+                            $shortClass = class_basename($fullClass);
+                            $keyedMethodVars = [];
+                            foreach ($methodVars as $v) {
+                                $keyedMethodVars[$v['name']] = $v;
+                            }
+                            $this->composerClasses[$fullClass] = $keyedMethodVars;
+                            $this->composerClasses[$shortClass] = $keyedMethodVars;
+
+                            foreach ([$fullClass, $shortClass] as $cKey) {
+                                if (isset($this->composerBindings[$cKey])) {
+                                    foreach ($this->composerBindings[$cKey] as $tView) {
+                                        $this->recordViewData($tView, $methodVars);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // 5. Match view() function calls, View::make(), new Content(...), or custom @view-string methods
                 $viewCall = $this->extractViewCall($node);
                 if ($viewCall !== null) {
                     $this->recordViewData($viewCall['name'], $viewCall['variables']);
                 }
+
+                // 6. Match View::share(), View::composer(), View::creator(), view()->share(), view()->composer(), view()->creator()
+                $this->extractViewShareAndComposers($node);
 
                 return null;
             }
@@ -264,6 +302,10 @@ class PhpAstViewAnalyzer
                     $this->currentClass = null;
                     $this->currentExtends = null;
                     $this->currentClassProperties = [];
+                }
+
+                if ($node instanceof Node\Stmt\Namespace_) {
+                    $this->currentNamespace = '';
                 }
 
                 return null;
@@ -562,7 +604,50 @@ class PhpAstViewAnalyzer
                 return $variables;
             }
 
-            protected function extractStringValue(Expr $expr): ?string
+            public function extractVariablesFromDataArgWithScope(Expr $expr, array $scope): array
+            {
+                $variables = [];
+
+                // Array: ['user' => $user, 'posts' => $posts, 'title' => 'Hello', 'count' => 10]
+                if ($expr instanceof Array_) {
+                    foreach ($expr->items as $item) {
+                        if ($item instanceof ArrayItem && $item->key !== null) {
+                            $keyName = $this->extractStringValue($item->key);
+                            if ($keyName !== null) {
+                                $type = $this->inferTypeFromExpr($item->value, $scope);
+                                $variables[] = [
+                                    'name' => $keyName,
+                                    'type' => $type,
+                                    'origin' => 'View Composer Data',
+                                    'line' => $item->getStartLine(),
+                                    'source' => $this->filePath,
+                                ];
+                            }
+                        }
+                    }
+                }
+
+                // compact('user', 'posts', 'title')
+                if ($expr instanceof FuncCall && $expr->name instanceof Name && $expr->name->toString() === 'compact') {
+                    foreach ($expr->args as $arg) {
+                        $varName = $this->extractStringValue($arg->value);
+                        if ($varName !== null) {
+                            $type = $scope[$varName]['type'] ?? 'mixed';
+                            $variables[] = [
+                                'name' => $varName,
+                                'type' => $type,
+                                'origin' => 'compact()',
+                                'line' => $arg->getStartLine(),
+                                'source' => $this->filePath,
+                            ];
+                        }
+                    }
+                }
+
+                return $variables;
+            }
+
+            public function extractStringValue(Expr $expr): ?string
             {
                 if ($expr instanceof String_) {
                     return $expr->value;
@@ -579,11 +664,13 @@ class PhpAstViewAnalyzer
                 return null;
             }
 
-            protected function inferTypeFromExpr(Expr $expr): string
+            public function inferTypeFromExpr(Expr $expr, ?array $scope = null): string
             {
+                $scope ??= $this->currentScope;
+
                 if ($expr instanceof Variable && is_string($expr->name)) {
                     $varName = $expr->name;
-                    return $this->currentScope[$varName]['type'] ?? 'mixed';
+                    return $scope[$varName]['type'] ?? 'mixed';
                 }
 
                 if ($expr instanceof String_) {
@@ -862,7 +949,7 @@ class PhpAstViewAnalyzer
                 return $this->qualifyTypeName($type);
             }
 
-            protected function recordViewData(string $viewName, array $variables): void
+            public function recordViewData(string $viewName, array $variables): void
             {
                 if (!isset($this->views[$viewName])) {
                     $this->views[$viewName] = [
@@ -882,6 +969,327 @@ class PhpAstViewAnalyzer
                         'source' => $this->filePath,
                     ]);
                 }
+            }
+
+            public function extractViewShareAndComposers(Node $node): void
+            {
+                // 1. Static calls on View facade: View::share(...), View::composer(...), View::creator(...)
+                if ($node instanceof StaticCall && $this->isViewFacade($node->class)) {
+                    $methodName = $node->name instanceof Identifier ? $node->name->toString() : '';
+                    if ($methodName === 'share') {
+                        $this->handleViewShareCall($node);
+                    } elseif (in_array($methodName, ['composer', 'creator'], true)) {
+                        $this->handleViewComposerCall($node);
+                    }
+                }
+
+                // 2. Method calls on view() / app('view'): view()->share(...), view()->composer(...)
+                if ($node instanceof MethodCall && $node->name instanceof Identifier) {
+                    $methodName = $node->name->toString();
+                    if ($methodName === 'share' && $this->isViewInstance($node->var)) {
+                        $this->handleViewShareCall($node);
+                    } elseif (in_array($methodName, ['composer', 'creator'], true) && $this->isViewInstance($node->var)) {
+                        $this->handleViewComposerCall($node);
+                    }
+                }
+            }
+
+            public function isViewFacade(Node $classNode): bool
+            {
+                if (!$classNode instanceof Name) {
+                    return false;
+                }
+
+                $raw = $classNode->toString();
+                $firstPart = $classNode->getFirst();
+                $resolved = isset($this->useAliases[$firstPart])
+                    ? $this->useAliases[$firstPart] . substr($raw, strlen($firstPart))
+                    : $raw;
+
+                $normalized = ltrim($resolved, '\\');
+                return in_array($normalized, [
+                    'View',
+                    'Illuminate\Support\Facades\View',
+                    'Facades\View',
+                ], true);
+            }
+
+            public function isViewInstance(Expr $expr): bool
+            {
+                if ($expr instanceof FuncCall && $expr->name instanceof Name) {
+                    $name = ltrim($expr->name->toString(), '\\');
+                    if ($name === 'view') {
+                        return true;
+                    }
+                    if (in_array($name, ['app', 'resolve'], true) && !empty($expr->args) && isset($expr->args[0])) {
+                        $argVal = $this->extractStringValue($expr->args[0]->value);
+                        if (in_array($argVal, ['view', 'Illuminate\View\Factory', 'Illuminate\Contracts\View\Factory'], true)) {
+                            return true;
+                        }
+                    }
+                }
+
+                if ($expr instanceof StaticCall && $this->isViewFacade($expr->class)) {
+                    return true;
+                }
+
+                return false;
+            }
+
+            public function handleViewShareCall(Node $node): void
+            {
+                if (empty($node->args) || !isset($node->args[0])) {
+                    return;
+                }
+
+                if (count($node->args) === 1) {
+                    $variables = $this->extractVariablesFromDataArg($node->args[0]->value);
+                    $this->recordViewData('*', $variables);
+                } elseif (count($node->args) >= 2 && isset($node->args[1])) {
+                    $keyName = $this->extractStringValue($node->args[0]->value);
+                    if ($keyName !== null) {
+                        $type = $this->inferTypeFromExpr($node->args[1]->value);
+                        $variables = [[
+                            'name' => $keyName,
+                            'type' => $type,
+                            'origin' => 'View::share()',
+                            'line' => $node->getStartLine(),
+                            'source' => $this->filePath,
+                        ]];
+                        $this->recordViewData('*', $variables);
+                    }
+                }
+            }
+
+            public function handleViewComposerCall(Node $node): void
+            {
+                if (count($node->args) < 2 || !isset($node->args[0], $node->args[1])) {
+                    return;
+                }
+
+                $targetViews = [];
+                $targetExpr = $node->args[0]->value;
+                if ($targetExpr instanceof Array_) {
+                    foreach ($targetExpr->items as $item) {
+                        if ($item instanceof ArrayItem) {
+                            $val = $this->extractStringValue($item->value);
+                            if ($val !== null) {
+                                $targetViews[] = $val;
+                            }
+                        }
+                    }
+                } else {
+                    $val = $this->extractStringValue($targetExpr);
+                    if ($val !== null) {
+                        $targetViews[] = $val;
+                    }
+                }
+
+                if (empty($targetViews)) {
+                    return;
+                }
+
+                $callbackExpr = $node->args[1]->value;
+
+                // Case A: Closure or Arrow Function
+                if ($callbackExpr instanceof Node\Expr\Closure || $callbackExpr instanceof Node\Expr\ArrowFunction) {
+                    $closureVariables = $this->extractVariablesFromClosure($callbackExpr);
+                    foreach ($targetViews as $targetView) {
+                        $this->recordViewData($targetView, $closureVariables);
+                    }
+                    return;
+                }
+
+                // Case B: Class string / ClassConstFetch: ProfileComposer::class or 'App\View\Composers\ProfileComposer'
+                $className = $this->extractClassNameFromExpr($callbackExpr);
+                if ($className !== null) {
+                    $cleanClass = ltrim($className, '\\');
+                    $shortClass = class_basename($cleanClass);
+
+                    foreach ($targetViews as $targetView) {
+                        $this->composerBindings[$cleanClass][] = $targetView;
+                        $this->composerBindings[$shortClass][] = $targetView;
+                    }
+
+                    if (isset($this->composerClasses[$cleanClass])) {
+                        foreach ($targetViews as $targetView) {
+                            $this->recordViewData($targetView, $this->composerClasses[$cleanClass]);
+                        }
+                    } elseif (isset($this->composerClasses[$shortClass])) {
+                        foreach ($targetViews as $targetView) {
+                            $this->recordViewData($targetView, $this->composerClasses[$shortClass]);
+                        }
+                    }
+                }
+            }
+
+            public function extractVariablesFromClosure(Node\Expr\Closure|Node\Expr\ArrowFunction $closure): array
+            {
+                $variables = [];
+                $localScope = $this->currentScope;
+
+                $stmts = $closure instanceof Node\Expr\ArrowFunction
+                    ? [new Node\Stmt\Expression($closure->expr)]
+                    : $closure->stmts;
+
+                $subTraverser = new NodeTraverser();
+                $subVisitor = new class($variables, $localScope, $this->filePath, $this) extends NodeVisitorAbstract {
+                    public function __construct(
+                        public array &$variables,
+                        public array &$localScope,
+                        public string $filePath,
+                        public object $parentVisitor,
+                    ) {}
+
+                    public function enterNode(Node $node)
+                    {
+                        if ($node instanceof Assign && $node->var instanceof Variable && is_string($node->var->name)) {
+                            $varName = $node->var->name;
+                            $type = $this->parentVisitor->inferTypeFromExpr($node->expr, $this->localScope);
+                            $this->localScope[$varName] = [
+                                'name' => $varName,
+                                'type' => $type,
+                                'origin' => 'Closure Assignment',
+                            ];
+                        }
+
+                        if ($node instanceof MethodCall && $node->name instanceof Identifier && $node->name->toString() === 'with') {
+                            if ($node->var instanceof Variable && in_array($node->var->name, ['view', 'v'], true)) {
+                                if (count($node->args) === 1 && isset($node->args[0])) {
+                                    $extracted = $this->parentVisitor->extractVariablesFromDataArgWithScope($node->args[0]->value, $this->localScope);
+                                    foreach ($extracted as $v) {
+                                        $this->variables[] = $v;
+                                    }
+                                } elseif (count($node->args) >= 2 && isset($node->args[0], $node->args[1])) {
+                                    $keyName = $this->parentVisitor->extractStringValue($node->args[0]->value);
+                                    if ($keyName !== null) {
+                                        $type = $this->parentVisitor->inferTypeFromExpr($node->args[1]->value, $this->localScope);
+                                        $this->variables[] = [
+                                            'name' => $keyName,
+                                            'type' => $type,
+                                            'origin' => 'View Composer with()',
+                                            'line' => $node->getStartLine(),
+                                            'source' => $this->filePath,
+                                        ];
+                                    }
+                                }
+                            }
+                        }
+
+                        if ($node instanceof Assign && $node->var instanceof Node\Expr\ArrayDimFetch && $node->var->var instanceof Variable && in_array($node->var->var->name, ['view', 'v'], true)) {
+                            if ($node->var->dim !== null) {
+                                $keyName = $this->parentVisitor->extractStringValue($node->var->dim);
+                                if ($keyName !== null) {
+                                    $type = $this->parentVisitor->inferTypeFromExpr($node->expr, $this->localScope);
+                                    $this->variables[] = [
+                                        'name' => $keyName,
+                                        'type' => $type,
+                                        'origin' => 'View Composer ArrayAccess',
+                                        'line' => $node->getStartLine(),
+                                        'source' => $this->filePath,
+                                    ];
+                                }
+                            }
+                        }
+
+                        return null;
+                    }
+                };
+
+                $subTraverser->addVisitor($subVisitor);
+                $subTraverser->traverse($stmts);
+
+                return $variables;
+            }
+
+            public function extractVariablesFromMethodStmts(array $stmts): array
+            {
+                $variables = [];
+                $localScope = $this->currentScope;
+
+                $subTraverser = new NodeTraverser();
+                $subVisitor = new class($variables, $localScope, $this->filePath, $this) extends NodeVisitorAbstract {
+                    public function __construct(
+                        public array &$variables,
+                        public array &$localScope,
+                        public string $filePath,
+                        public object $parentVisitor,
+                    ) {}
+
+                    public function enterNode(Node $node)
+                    {
+                        if ($node instanceof Assign && $node->var instanceof Variable && is_string($node->var->name)) {
+                            $varName = $node->var->name;
+                            $type = $this->parentVisitor->inferTypeFromExpr($node->expr, $this->localScope);
+                            $this->localScope[$varName] = [
+                                'name' => $varName,
+                                'type' => $type,
+                                'origin' => 'Composer Assignment',
+                            ];
+                        }
+
+                        if ($node instanceof MethodCall && $node->name instanceof Identifier && $node->name->toString() === 'with') {
+                            if ($node->var instanceof Variable && in_array($node->var->name, ['view', 'v'], true)) {
+                                if (count($node->args) === 1 && isset($node->args[0])) {
+                                    $extracted = $this->parentVisitor->extractVariablesFromDataArgWithScope($node->args[0]->value, $this->localScope);
+                                    foreach ($extracted as $v) {
+                                        $this->variables[] = $v;
+                                    }
+                                } elseif (count($node->args) >= 2 && isset($node->args[0], $node->args[1])) {
+                                    $keyName = $this->parentVisitor->extractStringValue($node->args[0]->value);
+                                    if ($keyName !== null) {
+                                        $type = $this->parentVisitor->inferTypeFromExpr($node->args[1]->value, $this->localScope);
+                                        $this->variables[] = [
+                                            'name' => $keyName,
+                                            'type' => $type,
+                                            'origin' => 'View Composer with()',
+                                            'line' => $node->getStartLine(),
+                                            'source' => $this->filePath,
+                                        ];
+                                    }
+                                }
+                            }
+                        }
+
+                        if ($node instanceof Assign && $node->var instanceof Node\Expr\ArrayDimFetch && $node->var->var instanceof Variable && in_array($node->var->var->name, ['view', 'v'], true)) {
+                            if ($node->var->dim !== null) {
+                                $keyName = $this->parentVisitor->extractStringValue($node->var->dim);
+                                if ($keyName !== null) {
+                                    $type = $this->parentVisitor->inferTypeFromExpr($node->expr, $this->localScope);
+                                    $this->variables[] = [
+                                        'name' => $keyName,
+                                        'type' => $type,
+                                        'origin' => 'View Composer ArrayAccess',
+                                        'line' => $node->getStartLine(),
+                                        'source' => $this->filePath,
+                                    ];
+                                }
+                            }
+                        }
+
+                        return null;
+                    }
+                };
+
+                $subTraverser->addVisitor($subVisitor);
+                $subTraverser->traverse($stmts);
+
+                return $variables;
+            }
+
+            public function extractClassNameFromExpr(Expr $expr): ?string
+            {
+                if ($expr instanceof Node\Expr\ClassConstFetch && $expr->class instanceof Name) {
+                    $raw = $expr->class->toString();
+                    return $this->qualifyTypeName($raw);
+                }
+
+                if ($expr instanceof String_) {
+                    $val = explode('@', $expr->value)[0];
+                    return $this->qualifyTypeName($val);
+                }
+
+                return null;
             }
 
             protected function isMailMessageOrViewChain(Node $expr): bool
@@ -904,6 +1312,15 @@ class PhpAstViewAnalyzer
         $traverser = new NodeTraverser();
         $traverser->addVisitor($visitor);
         $traverser->traverse($stmts);
+
+        // Merge any composer bindings resolved in this file
+        foreach ($composerBindings as $cKey => $targetViews) {
+            if (isset($composerClasses[$cKey])) {
+                foreach ($targetViews as $tView) {
+                    $visitor->recordViewData($tView, $composerClasses[$cKey]);
+                }
+            }
+        }
 
         return $views;
     }

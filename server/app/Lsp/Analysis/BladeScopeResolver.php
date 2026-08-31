@@ -57,9 +57,16 @@ class BladeScopeResolver
             }
         }
 
-        if (isset($data['views'][$viewKey]) && is_array($data['views'][$viewKey])) {
-            $indexedScope = ViewScope::fromLegacy($viewKey, $data['views'][$viewKey]);
-            $scope->merge($indexedScope);
+        // 3. Controller/View/Composer indexed variables matching this view or wildcards
+        foreach ($data['views'] ?? [] as $indexedKey => $viewData) {
+            if (!is_array($viewData)) {
+                continue;
+            }
+
+            if ($this->matchesViewKey((string) $indexedKey, $viewKey)) {
+                $indexedScope = ViewScope::fromLegacy((string) $indexedKey, $viewData);
+                $scope->merge($indexedScope);
+            }
         }
 
         $relSource = $this->relativePath($document->uri);
@@ -116,10 +123,16 @@ class BladeScopeResolver
             }
         }
 
-        // 2. Controller/View indexed variables
-        if (isset($data['views'][$viewKey]) && is_array($data['views'][$viewKey])) {
-            $indexedScope = ViewScope::fromLegacy($viewKey, $data['views'][$viewKey]);
-            $scope->merge($indexedScope);
+        // 3. Controller/View/Composer indexed variables matching this view or wildcards
+        foreach ($data['views'] ?? [] as $indexedKey => $viewData) {
+            if (!is_array($viewData)) {
+                continue;
+            }
+
+            if ($this->matchesViewKey((string) $indexedKey, $viewKey)) {
+                $indexedScope = ViewScope::fromLegacy((string) $indexedKey, $viewData);
+                $scope->merge($indexedScope);
+            }
         }
 
         $bladeLineIndex = $line + 1; // 1-indexed
@@ -423,5 +436,22 @@ class BladeScopeResolver
 
         $col = $offset - $lineOffsets[$line];
         return ['line' => $line, 'col' => max(0, $col)];
+    }
+
+    public function matchesViewKey(string $pattern, string $viewKey): bool
+    {
+        if ($pattern === '*' || $pattern === $viewKey) {
+            return true;
+        }
+
+        if ($viewKey === '') {
+            return false;
+        }
+
+        if (str_contains($pattern, '*')) {
+            return \Illuminate\Support\Str::is($pattern, $viewKey);
+        }
+
+        return false;
     }
 }
