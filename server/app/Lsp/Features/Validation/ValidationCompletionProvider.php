@@ -6,11 +6,14 @@ namespace App\Lsp\Features\Validation;
 
 use App\Lsp\Contracts\CompletionProvider;
 use App\Lsp\Document;
+use App\Lsp\Project;
+use App\Lsp\Support\Utf16Position;
+use Throwable;
 
 class ValidationCompletionProvider implements CompletionProvider
 {
     /**
-     * The Laravel validation rules available for completion.
+     * Fallback snippets for common Laravel validation rules.
      *
      * @var array<string, string>
      */
@@ -99,6 +102,15 @@ class ValidationCompletionProvider implements CompletionProvider
         'url'                  => 'url',
         'uuid'                 => 'uuid',
     ];
+
+    /**
+     * @var array<string, array<string, mixed>>|null
+     */
+    protected ?array $indexedRulesCache = null;
+
+    public function __construct(
+        protected ?Project $project = null,
+    ) {}
 
     /**
      * Provide validation rule completions for the given document and position.
@@ -324,7 +336,7 @@ class ValidationCompletionProvider implements CompletionProvider
     {
         $range = $this->replacementRange($document, $position);
 
-        return collect($this->rules)
+        return collect($this->rules())
             ->map(fn (string $insertText, string $label): array => [
                 'label'    => $label,
                 'kind'     => 13,
@@ -349,8 +361,8 @@ class ValidationCompletionProvider implements CompletionProvider
         $line = (int) $position['line'];
         $character = (int) $position['character'];
         $lines = explode("\n", $document->content);
-        $text = substr($lines[$line] ?? '', 0, $character);
-        $start = $character - strlen($this->fragment($text));
+        $text = Utf16Position::substr($lines[$line] ?? '', 0, $character);
+        $start = $character - Utf16Position::length($this->fragment($text));
 
         return [
             'start' => [
@@ -372,5 +384,65 @@ class ValidationCompletionProvider implements CompletionProvider
         preg_match('/[\\w\\d\\-_\\.\\:\\\\\/@]+$/', $text, $matches);
 
         return $matches[0] ?? '';
+    }
+
+    /**
+     * Return indexed validation rules with fallback snippets filled in.
+     *
+     * @return array<string, string>
+     */
+    protected function rules(): array
+    {
+        $rules = [];
+
+        foreach ($this->indexedRules() as $name => $rule) {
+            if (!is_array($rule)) {
+                continue;
+            }
+
+            $ruleName = strtolower((string) ($rule['name'] ?? $name));
+            if ($ruleName === '') {
+                continue;
+            }
+
+            $rules[$ruleName] = $this->rules[$ruleName] ?? ((bool) ($rule['hasParams'] ?? false) ? sprintf('%s:${1}', $ruleName) : $ruleName);
+        }
+
+        foreach ($this->rules as $name => $snippet) {
+            if (!isset($rules[$name])) {
+                $rules[$name] = $snippet;
+            }
+        }
+
+        return $rules;
+    }
+
+    /**
+     * @return array<string, array<string, mixed>>
+     */
+    protected function indexedRules(): array
+    {
+        if ($this->indexedRulesCache !== null) {
+            return $this->indexedRulesCache;
+        }
+
+        $this->indexedRulesCache = [];
+
+        if ($this->project === null) {
+            return $this->indexedRulesCache;
+        }
+
+        try {
+            if (!method_exists($this->project->index, 'validationRules')) {
+                return $this->indexedRulesCache;
+            }
+
+            $rules = $this->project->index->validationRules();
+            $this->indexedRulesCache = is_array($rules) ? $rules : [];
+        } catch (Throwable) {
+            return $this->indexedRulesCache;
+        }
+
+        return $this->indexedRulesCache;
     }
 }
