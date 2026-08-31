@@ -1,0 +1,70 @@
+<?php
+
+declare(strict_types=1);
+
+namespace App\Lsp\Methods;
+
+use App\Lsp\Contracts\Method;
+use App\Lsp\DocumentManager;
+use App\Lsp\FeatureRegistry;
+use App\Lsp\Project;
+use App\Lsp\Transport\JsonRpcRequest;
+use App\Lsp\Transport\JsonRpcResponse;
+
+class TextDocumentHover implements Method
+{
+    /**
+     * Instantiate a new class instance.
+     */
+    public function __construct(
+        protected DocumentManager $documents,
+        protected FeatureRegistry $features,
+        protected Project $project,
+    ) {}
+
+    /**
+     * Handle the textDocument/hover request.
+     */
+    public function handle(JsonRpcRequest $request): JsonRpcResponse
+    {
+        $document = $this->documents->get(
+            (string) $request->get('textDocument.uri')
+        );
+
+        if ($document === null) {
+            return JsonRpcResponse::result($request->id(), null);
+        }
+
+        $position = $request->get('position', []);
+
+        if (!is_array($position)) {
+            return JsonRpcResponse::result($request->id(), null);
+        }
+
+        foreach ($this->features->hovers() as $provider) {
+            $hover = $provider->get($document, $position);
+
+            if ($hover !== null) {
+                return JsonRpcResponse::result($request->id(), $hover);
+            }
+
+            $request->cancelIfRequested();
+        }
+
+        if (str_ends_with($document->uri, '.blade.php') && is_int($position['line'] ?? null) && is_int($position['character'] ?? null)) {
+            try {
+                $scope = $this->features->scopeResolver()->resolveAtPosition($document, (int) $position['line'], (int) $position['character']);
+                $virtualDoc = $this->features->bladeCompiler()->compile($document, $scope);
+                $virtualPos = $virtualDoc->sourceMap->bladeToVirtualPosition((int) $position['line'], (int) $position['character']);
+                if ($virtualPos !== null) {
+                    $phpHover = $this->features->phpIntelligence()->hover($virtualDoc, $virtualPos);
+                    if ($phpHover !== null) {
+                        return JsonRpcResponse::result($request->id(), $phpHover);
+                    }
+                }
+            } catch (\Throwable) {}
+        }
+
+        return JsonRpcResponse::result($request->id(), null);
+    }
+}
