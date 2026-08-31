@@ -65,3 +65,31 @@ test('docblock parser unwraps generic collection and array item types', function
     expect($parser->unwrapItemType('list<string>'))->toBe('string');
     expect($parser->unwrapItemType('string'))->toBeNull();
 });
+
+test('docblock parser extracts @return tag type string', function () {
+    $parser = new DocBlockParser();
+
+    $doc = <<<'DOC'
+    /**
+     * Get auth manager.
+     *
+     * @return \Illuminate\Auth\AuthManager|\Illuminate\Contracts\Auth\Guard
+     */
+    DOC;
+    expect($parser->extractReturnTag($doc))->toBe('(\Illuminate\Auth\AuthManager | \Illuminate\Contracts\Auth\Guard)');
+
+    $docSimple = <<<'DOC'
+    /**
+     * @return string
+     */
+    DOC;
+    expect($parser->extractReturnTag($docSimple))->toBe('string');
+
+    $docEmpty = <<<'DOC'
+    /**
+     * No return tag here
+     */
+    DOC;
+    expect($parser->extractReturnTag($docEmpty))->toBeNull();
+});
+

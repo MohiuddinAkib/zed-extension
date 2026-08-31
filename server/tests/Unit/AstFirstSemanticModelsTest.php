@@ -107,7 +107,7 @@ BLADE;
     expect($vars['variant']['default'])->toBe("'info,warning'");
     expect($vars['variant']['type'])->not->toContain('default');
 
-    expect($vars['options']['type'])->toBe('array');
+    expect($vars['options']['type'])->toBe('array{size: string, dismissible: bool}');
     expect($vars['formatter']['type'])->toBe('\\Closure');
     expect($vars['state']['type'])->toBe('string');
     expect($vars['metrics']['type'])->toBe('\\App\\Services\\MetricsService');

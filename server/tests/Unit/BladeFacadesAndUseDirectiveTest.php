@@ -208,3 +208,73 @@ test('BladeMemberLinkProvider provides links for @use directive classes and stat
     $targets = collect($links)->pluck('target')->all();
     expect(collect($targets)->some(fn ($t) => str_contains($t, 'Js.php')))->toBeTrue();
 });
+
+test('BladeMemberCompletionProvider offers facades and aliases on subsequent lines inside multiline @php block', function () {
+    $provider = new BladeMemberCompletionProvider($this->project);
+
+    $doc = new Document('file:///test/view.blade.php', <<<'BLADE'
+@use('App\Models\User', 'UserModel')
+@php
+    $x = 10;
+    St
+@endphp
+BLADE);
+
+    // Cursor at line 3 after "    St" (character 6)
+    $completions = $provider->get($doc, ['line' => 3, 'character' => 6]);
+    $labels = collect($completions)->pluck('label')->all();
+
+    expect($labels)->toContain('Str');
+
+    $docUser = new Document('file:///test/view.blade.php', <<<'BLADE'
+@use('App\Models\User', 'UserModel')
+@php
+    $x = 10;
+    UserM
+@endphp
+BLADE);
+
+    // Cursor at line 3 after "    UserM" (character 9)
+    $userCompletions = $provider->get($docUser, ['line' => 3, 'character' => 9]);
+    $userLabels = collect($userCompletions)->pluck('label')->all();
+
+    expect($userLabels)->toContain('UserModel');
+});
+
+test('BladeAstAnalyzer and BladeMemberCompletionProvider support standard PHP use statements inside @php blocks', function () {
+    $analyzer = new BladeAstAnalyzer();
+
+    $content = <<<'BLADE'
+@php
+    use App\Models\User as AppUser;
+    use App\Services\PaymentService;
+@endphp
+
+<div>
+    {{ AppUser::where('id', 1) }}
+</div>
+BLADE;
+
+    $uses = $analyzer->extractUseDirectives($content);
+
+    expect($uses)->toHaveKey('AppUser')
+        ->and($uses['AppUser']['class'])->toBe('\\App\\Models\\User')
+        ->and($uses)->toHaveKey('PaymentService')
+        ->and($uses['PaymentService']['class'])->toBe('\\App\\Services\\PaymentService');
+
+    $provider = new BladeMemberCompletionProvider($this->project);
+    $doc = new Document('file:///test/view.blade.php', <<<'BLADE'
+@php
+    use App\Models\User as AppUser;
+@endphp
+@php
+    AppU
+@endphp
+BLADE);
+
+    $completions = $provider->get($doc, ['line' => 4, 'character' => 8]);
+    $labels = collect($completions)->pluck('label')->all();
+
+    expect($labels)->toContain('AppUser');
+});
+
