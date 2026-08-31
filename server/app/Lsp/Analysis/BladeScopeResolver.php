@@ -21,7 +21,7 @@ class BladeScopeResolver
         protected Project $project,
         protected ?BladeAstAnalyzer $bladeAnalyzer = null,
     ) {
-        $this->bladeAnalyzer ??= new BladeAstAnalyzer();
+        $this->bladeAnalyzer ??= new BladeAstAnalyzer($this->project);
         $this->docBlockParser = new DocBlockParser();
     }
 
@@ -257,7 +257,59 @@ class BladeScopeResolver
                 }
             }
 
-            // 5. Match paired @error / @enderror ranges
+            // 5. Match paired @for / @endfor ranges
+            $forStack = [];
+            $forRanges = [];
+            foreach ($allDirectives as $dir) {
+                $name = $dir->content;
+                $dLine = 1;
+                if ($dir->position) {
+                    $startChar = $dir->position->startOffset;
+                    $startByte = strlen(mb_substr($document->content, 0, $startChar));
+                    $loc = $this->offsetToLineAndCol($startByte, $lineOffsets);
+                    $dLine = $loc['line'] + 1;
+                }
+
+                if ($name === 'for') {
+                    $args = $dir->arguments ? (string) ($dir->arguments->innerContent ?? $dir->arguments) : '';
+                    if (str_starts_with($args, '(') && str_ends_with($args, ')')) {
+                        $args = substr($args, 1, -1);
+                    }
+                    $forStack[] = ['startLine' => $dLine, 'args' => $args];
+                } elseif ($name === 'endfor') {
+                    if (!empty($forStack)) {
+                        $top = array_pop($forStack);
+                        $forRanges[] = ['startLine' => $top['startLine'], 'endLine' => $dLine, 'args' => $top['args']];
+                    }
+                }
+            }
+            while (!empty($forStack)) {
+                $top = array_pop($forStack);
+                $forRanges[] = ['startLine' => $top['startLine'], 'endLine' => count($lines), 'args' => $top['args']];
+            }
+
+            foreach ($forRanges as $range) {
+                if ($bladeLineIndex >= $range['startLine'] && $bladeLineIndex <= $range['endLine']) {
+                    if (preg_match('/\$([a-zA-Z0-9_]+)\s*=/', $range['args'], $m)) {
+                        $varName = $m[1];
+                        $scope->addVariable(new VariableSymbol(
+                            name: $varName,
+                            type: TypeRef::fromString('int'),
+                            origin: new ScopeOrigin('@for', $this->relativePath($document->uri), $range['startLine'], 'Loop index variable'),
+                            detail: "For loop index variable (\${$varName})",
+                        ));
+                    }
+                    $scope->addVariable(new VariableSymbol(
+                        name: 'loop',
+                        type: TypeRef::fromString('object'),
+                        origin: new ScopeOrigin('@for', null, $range['startLine'], 'Blade Loop Variable'),
+                        detail: 'Laravel Loop Variable',
+                    ));
+                }
+            }
+
+            // 6. Match paired @error / @enderror ranges
+
             $errorStack = [];
             $errorRanges = [];
             foreach ($allDirectives as $dir) {

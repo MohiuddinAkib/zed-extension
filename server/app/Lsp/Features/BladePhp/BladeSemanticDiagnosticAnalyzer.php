@@ -9,13 +9,15 @@ use App\Lsp\Analysis\BladePhpAstAnalyzer;
 use App\Lsp\Analysis\BladeScopeResolver;
 use App\Lsp\Analysis\ComponentRegistry;
 use App\Lsp\Analysis\DocBlockParser;
+use App\Lsp\Analysis\FunctionTypeResolver;
+use App\Lsp\Analysis\SemanticIndex;
 use App\Lsp\Contracts\DiagnosticProvider;
 use App\Lsp\Document;
-use App\Lsp\Features\AppBindings\AppBindingContainerTypeMap;
 use App\Lsp\Features\BladeVariables\BladeMemberHoverProvider;
 use App\Lsp\Features\Facades\FacadeMap;
 use App\Lsp\Features\Functions\GlobalFunctionRegistry;
 use App\Lsp\Project;
+use Illuminate\Container\Container;
 use ReflectionClass;
 use ReflectionFunction;
 use ReflectionMethod;
@@ -25,25 +27,52 @@ use Throwable;
 class BladeSemanticDiagnosticAnalyzer implements DiagnosticProvider
 {
     protected BladePhpAstAnalyzer $astAnalyzer;
+
     protected BladeAstAnalyzer $bladeAnalyzer;
+
     protected BladeScopeResolver $scopeResolver;
+
     protected GlobalFunctionRegistry $functionRegistry;
+
     protected BladeMemberHoverProvider $hoverHelper;
+
     protected ComponentRegistry $componentRegistry;
+
     protected DocBlockParser $docBlockParser;
+
+    protected SemanticIndex $semanticIndex;
+
+    protected FunctionTypeResolver $functionTypeResolver;
+
     protected bool $autoloaderRegistered = false;
 
     public function __construct(
         protected Project $project,
+        ?SemanticIndex $semanticIndex = null,
+        ?FunctionTypeResolver $functionTypeResolver = null,
     ) {
-        $this->astAnalyzer = new BladePhpAstAnalyzer();
-        $this->bladeAnalyzer = new BladeAstAnalyzer();
-        $this->scopeResolver = new BladeScopeResolver($this->project, $this->bladeAnalyzer);
+        $this->semanticIndex = $semanticIndex ?? $this->resolveSemanticIndex();
         $this->functionRegistry = new GlobalFunctionRegistry($this->project);
-        $this->hoverHelper = new BladeMemberHoverProvider($this->project);
+        $this->docBlockParser = new DocBlockParser;
+        $this->functionTypeResolver = $functionTypeResolver ?? new FunctionTypeResolver($this->project, $this->functionRegistry, $this->docBlockParser, $this->semanticIndex);
+        $this->bladeAnalyzer = new BladeAstAnalyzer($this->project, $this->functionTypeResolver);
+        $this->astAnalyzer = new BladePhpAstAnalyzer;
+        $this->scopeResolver = new BladeScopeResolver($this->project, $this->bladeAnalyzer);
+        $this->hoverHelper = new BladeMemberHoverProvider($this->project, $this->semanticIndex, $this->functionTypeResolver);
         $this->componentRegistry = new ComponentRegistry($this->project);
-        $this->docBlockParser = new DocBlockParser();
     }
+
+    protected function resolveSemanticIndex(): SemanticIndex
+    {
+        $container = Container::getInstance();
+
+        if ($container->bound(SemanticIndex::class)) {
+            return $container->make(SemanticIndex::class);
+        }
+
+        return new SemanticIndex($this->project);
+    }
+
 
     /**
      * Get semantic diagnostics for the Blade document (parameter counts, method signatures, component props).
@@ -72,15 +101,27 @@ class BladeSemanticDiagnosticAnalyzer implements DiagnosticProvider
 
             $range = [
                 'start' => ['line' => $startLine, 'character' => $startCol],
-                'end' => ['line' => $startLine, 'character' => $endCol],
+                'end'   => ['line' => $startLine, 'character' => $endCol],
             ];
+
+            // 0. Validate Variable Access (Undefined Variables)
+            if ($kind === 'variable' && is_string($name) && $name !== '') {
+                $diag = $this->validateVariable($document, $name, $expr, $range, $viewKey);
+                if ($diag !== null) {
+                    $diagnostics[] = $diag;
+                }
+
+                continue;
+            }
 
             // 1. Validate Global & Custom Function Calls
             if ($kind === 'func_call' && $argCount !== null) {
+
                 $diag = $this->validateFunctionCall($name, $argCount, $range);
                 if ($diag !== null) {
                     $diagnostics[] = $diag;
                 }
+
                 continue;
             }
 
@@ -93,6 +134,7 @@ class BladeSemanticDiagnosticAnalyzer implements DiagnosticProvider
                         $diagnostics[] = $diag;
                     }
                 }
+
                 continue;
             }
 
@@ -108,17 +150,12 @@ class BladeSemanticDiagnosticAnalyzer implements DiagnosticProvider
 
                 $rootType = null;
                 if ($rootCall !== null && $rootCall !== 'class') {
-                    $rootType = match ($rootCall) {
-                        'app', 'resolve' => $rootCallArg ? AppBindingContainerTypeMap::resolveType($rootCallArg) : '\Illuminate\Foundation\Application',
-                        'auth' => '\Illuminate\Auth\AuthManager',
-                        'request' => '\Illuminate\Http\Request',
-                        'session' => '\Illuminate\Session\SessionManager',
-                        'now', 'today' => '\Illuminate\Support\Carbon',
-                        default => null,
-                    };
+                    $argCount = trim($rootCallArg ?? '') === '' ? 0 : 1;
+                    $rootType = $this->functionTypeResolver->resolve($rootCall, $rootCallArg, $document, $argCount);
                 } elseif ($varName !== '' && isset($variables[$varName])) {
                     $rootType = $variables[$varName]['type'] ?? null;
                 }
+
 
                 if ($rootType && $rootType !== 'mixed') {
                     $targetType = $this->resolveChainedType($rootType, $chain);
@@ -153,19 +190,19 @@ class BladeSemanticDiagnosticAnalyzer implements DiagnosticProvider
 
         if ($argCount < $minReq) {
             return [
-                'range' => $range,
+                'range'    => $range,
                 'severity' => 1, // Error
-                'message' => "Too few arguments to function {$name}(), {$argCount} passed and at least {$minReq} expected.\n\nSignature: {$sig}",
-                'source' => 'laravel-lsp',
+                'message'  => "Too few arguments to function {$name}(), {$argCount} passed and at least {$minReq} expected.\n\nSignature: {$sig}",
+                'source'   => 'laravel-lsp',
             ];
         }
 
         if (!$isVariadic && $maxParams !== null && $argCount > $maxParams) {
             return [
-                'range' => $range,
+                'range'    => $range,
                 'severity' => 1, // Error
-                'message' => "Too many arguments to function {$name}(), {$argCount} passed and at most {$maxParams} expected.\n\nSignature: {$sig}",
-                'source' => 'laravel-lsp',
+                'message'  => "Too many arguments to function {$name}(), {$argCount} passed and at most {$maxParams} expected.\n\nSignature: {$sig}",
+                'source'   => 'laravel-lsp',
             ];
         }
 
@@ -199,19 +236,19 @@ class BladeSemanticDiagnosticAnalyzer implements DiagnosticProvider
 
                     if ($argCount < $numReq) {
                         return [
-                            'range' => $range,
+                            'range'    => $range,
                             'severity' => 1, // Error
-                            'message' => "Too few arguments to method {$cleanClass}::{$method}(), {$argCount} passed and at least {$numReq} expected.\n\nSignature: {$sig}",
-                            'source' => 'laravel-lsp',
+                            'message'  => "Too few arguments to method {$cleanClass}::{$method}(), {$argCount} passed and at least {$numReq} expected.\n\nSignature: {$sig}",
+                            'source'   => 'laravel-lsp',
                         ];
                     }
 
                     if (!$isVariadic && $argCount > $numMax) {
                         return [
-                            'range' => $range,
+                            'range'    => $range,
                             'severity' => 1, // Error
-                            'message' => "Too many arguments to method {$cleanClass}::{$method}(), {$argCount} passed and at most {$numMax} expected.\n\nSignature: {$sig}",
-                            'source' => 'laravel-lsp',
+                            'message'  => "Too many arguments to method {$cleanClass}::{$method}(), {$argCount} passed and at most {$numMax} expected.\n\nSignature: {$sig}",
+                            'source'   => 'laravel-lsp',
                         ];
                     }
                 }
@@ -231,16 +268,17 @@ class BladeSemanticDiagnosticAnalyzer implements DiagnosticProvider
 
                         if ($argCount < $numReq) {
                             return [
-                                'range' => $range,
+                                'range'    => $range,
                                 'severity' => 1, // Error
-                                'message' => "Too few arguments to method {$rawClass}::{$method}(), {$argCount} passed and at least {$numReq} expected.\n\nSignature: {$sig}",
-                                'source' => 'laravel-lsp',
+                                'message'  => "Too few arguments to method {$rawClass}::{$method}(), {$argCount} passed and at least {$numReq} expected.\n\nSignature: {$sig}",
+                                'source'   => 'laravel-lsp',
                             ];
                         }
                     }
                 }
             }
-        } catch (Throwable) {}
+        } catch (Throwable) {
+        }
 
         return null;
     }
@@ -261,24 +299,25 @@ class BladeSemanticDiagnosticAnalyzer implements DiagnosticProvider
 
                     if ($argCount < $numReq) {
                         return [
-                            'range' => $range,
+                            'range'    => $range,
                             'severity' => 1, // Error
-                            'message' => "Too few arguments to method {$cleanClass}::{$method}(), {$argCount} passed and at least {$numReq} expected.\n\nSignature: {$sig}",
-                            'source' => 'laravel-lsp',
+                            'message'  => "Too few arguments to method {$cleanClass}::{$method}(), {$argCount} passed and at least {$numReq} expected.\n\nSignature: {$sig}",
+                            'source'   => 'laravel-lsp',
                         ];
                     }
 
                     if (!$isVariadic && $argCount > $numMax) {
                         return [
-                            'range' => $range,
+                            'range'    => $range,
                             'severity' => 1, // Error
-                            'message' => "Too many arguments to method {$cleanClass}::{$method}(), {$argCount} passed and at most {$numMax} expected.\n\nSignature: {$sig}",
-                            'source' => 'laravel-lsp',
+                            'message'  => "Too many arguments to method {$cleanClass}::{$method}(), {$argCount} passed and at most {$numMax} expected.\n\nSignature: {$sig}",
+                            'source'   => 'laravel-lsp',
                         ];
                     }
                 }
             }
-        } catch (Throwable) {}
+        } catch (Throwable) {
+        }
 
         return null;
     }
@@ -328,17 +367,18 @@ class BladeSemanticDiagnosticAnalyzer implements DiagnosticProvider
                             $diagnostics[] = [
                                 'range' => [
                                     'start' => ['line' => $startLine, 'character' => $startCol],
-                                    'end' => ['line' => $startLine, 'character' => $endCol],
+                                    'end'   => ['line' => $startLine, 'character' => $endCol],
                                 ],
                                 'severity' => 1, // Error
-                                'message' => "Missing required prop ':{$pName}' on component <x-{$tagName}>.\n\nProp definition: @props(['{$pName}'])",
-                                'source' => 'laravel-lsp',
+                                'message'  => "Missing required prop ':{$pName}' on component <x-{$tagName}>.\n\nProp definition: @props(['{$pName}'])",
+                                'source'   => 'laravel-lsp',
                             ];
                         }
                     }
                 }
             }
-        } catch (Throwable) {}
+        } catch (Throwable) {
+        }
 
         return $diagnostics;
     }
@@ -351,12 +391,14 @@ class BladeSemanticDiagnosticAnalyzer implements DiagnosticProvider
         if (function_exists($funcName)) {
             try {
                 $ref = new ReflectionFunction($funcName);
+
                 return [
                     $ref->getNumberOfRequiredParameters(),
                     $ref->getNumberOfParameters(),
                     $ref->isVariadic(),
                 ];
-            } catch (Throwable) {}
+            } catch (Throwable) {
+            }
         }
 
         if (preg_match('/\(([^)]*)\)/', $signature, $m)) {
@@ -397,11 +439,65 @@ class BladeSemanticDiagnosticAnalyzer implements DiagnosticProvider
         }
 
         $ret = $method->hasReturnType() ? ': ' . (string) $method->getReturnType() : ': mixed';
-        return "public " . ($method->isStatic() ? 'static ' : '') . "function {$method->getName()}(" . implode(', ', $params) . "){$ret}";
+
+        return 'public ' . ($method->isStatic() ? 'static ' : '') . "function {$method->getName()}(" . implode(', ', $params) . "){$ret}";
+    }
+
+    protected function validateVariable(Document $document, string $name, array $expr, array $range, string $viewKey): ?array
+    {
+        if (!$this->project->boolean('bladeUndefinedVariableDiagnostics', true)) {
+            return null;
+        }
+
+        // 1. Skip guarded variables (isset, empty, null-coalesce left side)
+        if (!empty($expr['isGuarded'])) {
+            return null;
+        }
+
+        // 2. Skip assignment targets ($var = ..., catch ($e), foreach target)
+        if (!empty($expr['isAssignment'])) {
+            return null;
+        }
+
+        // 3. Skip closure & arrow function parameter usages inside closure body
+        if (!empty($expr['isClosureParam'])) {
+            return null;
+        }
+
+        // 4. Skip PHP superglobals and $this
+        if (in_array($name, ['GLOBALS', '_SERVER', '_GET', '_POST', '_FILES', '_COOKIE', '_SESSION', '_REQUEST', '_ENV', 'this'], true)) {
+            return null;
+        }
+
+        // 5. Resolve Scope at the exact variable position
+        $startLine = (int) $range['start']['line'];
+        $startCol = (int) $range['start']['character'];
+        $scope = $this->scopeResolver->resolveAtPosition($document, $startLine, $startCol, $viewKey);
+
+        // 6. Check if scope contains the variable
+        if ($scope->hasVariable($name)) {
+            return null;
+        }
+
+        // 7. Allow component globals in component views
+        if ($this->scopeResolver->isComponentView($document->uri, $viewKey, $document->content)) {
+            if (in_array($name, ['attributes', 'slot', '__data', 'component'], true)) {
+                return null;
+            }
+        }
+
+        // 8. Return LSP Error diagnostic (Severity 1 = Red Squiggly)
+        return [
+            'range'    => $range,
+            'severity' => 1,
+            'source'   => 'blade-variable',
+            'message'  => "Undefined variable: \${$name}",
+        ];
     }
 
     protected function resolveChainedType(string $rootType, string $chain): string
     {
+
         if ($chain === '') {
             return $rootType;
         }
@@ -427,6 +523,7 @@ class BladeSemanticDiagnosticAnalyzer implements DiagnosticProvider
         if (preg_match('/resources\/views\/(.+)\.blade\.php$/', $path, $matches)) {
             return str_replace('/', '.', $matches[1]);
         }
+
         return basename($path, '.blade.php');
     }
 
@@ -442,7 +539,8 @@ class BladeSemanticDiagnosticAnalyzer implements DiagnosticProvider
             try {
                 @include_once $autoloadPath;
                 $this->autoloaderRegistered = true;
-            } catch (Throwable) {}
+            } catch (Throwable) {
+            }
         }
     }
 }

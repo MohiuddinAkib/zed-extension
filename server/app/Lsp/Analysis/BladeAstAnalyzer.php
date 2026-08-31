@@ -9,6 +9,8 @@ use App\Lsp\Semantics\ScopeOrigin;
 use App\Lsp\Semantics\SourceRange;
 use App\Lsp\Semantics\TypeRef;
 use App\Lsp\Semantics\VariableSymbol;
+use App\Lsp\Project;
+use Illuminate\Container\Container;
 use Illuminate\Support\Str;
 use PhpParser\ErrorHandler\Collecting;
 use PhpParser\Node;
@@ -42,12 +44,30 @@ class BladeAstAnalyzer
     protected Parser $phpParser;
     protected NodeFinder $nodeFinder;
     protected DocBlockParser $docBlockParser;
+    protected FunctionTypeResolver $functionTypeResolver;
 
-    public function __construct()
-    {
+    public function __construct(
+        protected ?Project $project = null,
+        ?FunctionTypeResolver $functionTypeResolver = null,
+    ) {
         $this->phpParser = (new ParserFactory())->createForNewestSupportedVersion();
         $this->nodeFinder = new NodeFinder();
         $this->docBlockParser = new DocBlockParser();
+        $this->functionTypeResolver = $functionTypeResolver ?? $this->resolveFunctionTypeResolver();
+    }
+
+    protected function resolveFunctionTypeResolver(): FunctionTypeResolver
+    {
+        if ($this->project !== null) {
+            return new FunctionTypeResolver($this->project);
+        }
+
+        $container = Container::getInstance();
+        if ($container->bound(FunctionTypeResolver::class)) {
+            return $container->make(FunctionTypeResolver::class);
+        }
+
+        return new FunctionTypeResolver();
     }
 
     /**
@@ -268,7 +288,7 @@ class BladeAstAnalyzer
     }
 
     /**
-     * Extract @use(...) directives from Blade template content.
+     * Extract @use(...) directives and PHP use statements from Blade template content.
      *
      * @return array<string, array{alias: string, class: string, line: int}> Map of alias => info
      */
@@ -291,20 +311,93 @@ class BladeAstAnalyzer
                     $uses[$parsed['alias']] = $parsed;
                 }
             }
+
+            // Extract PHP use statements from @php blocks and <?php tags
+            $phpSnippets = array_merge(
+                $doc->getPhpBlocks()->all(),
+                $doc->getPhpTags()->all()
+            );
+
+            foreach ($phpSnippets as $block) {
+                $code = (string) $block->content;
+                $startLine = $block->position ? $block->position->startLine : 1;
+                foreach ($this->extractPhpUseStatements($code, $startLine) as $alias => $uInfo) {
+                    $uses[$alias] = $uInfo;
+                }
+            }
         } catch (\Throwable) {}
 
-        // Regex fallback
-        if (preg_match_all('/@use\s*\(\s*(?:[\'"]([a-zA-Z0-9_\\\\]+)[\'"]|([a-zA-Z0-9_\\\\]+)::class)(?:\s*,\s*[\'"]([a-zA-Z0-9_]+)[\'"])?\s*\)/', $content, $matches, PREG_SET_ORDER)) {
+        // Regex fallback for @use
+        if (preg_match_all('/@use\s*\(\s*(?:[\'"]([a-zA-Z0-9_\\\\]+)[\'"]|([a-zA-Z0-9_\\\\]+)::class)(?:\s*,\s*[\'"]([a-zA-Z0-9_]+)[\'"])?\s*\)/', $content, $matches, PREG_SET_ORDER | PREG_OFFSET_CAPTURE)) {
             foreach ($matches as $m) {
-                $targetClass = !empty($m[1]) ? $m[1] : $m[2];
-                $alias = !empty($m[3]) ? $m[3] : class_basename($targetClass);
+                $targetClass = !empty($m[1][0]) ? $m[1][0] : $m[2][0];
+                $alias = !empty($m[3][0]) ? $m[3][0] : class_basename($targetClass);
+                $offset = $m[0][1];
+                $line = substr_count(substr($content, 0, $offset), "\n") + 1;
                 if (!isset($uses[$alias])) {
                     $uses[$alias] = [
                         'alias' => $alias,
                         'class' => '\\' . ltrim($targetClass, '\\'),
-                        'line' => 1,
+                        'line' => $line,
                     ];
                 }
+            }
+        }
+
+        // Regex fallback for standard PHP use statements (e.g. use App\Models\User; or use App\Models\User as UserModel;)
+        if (preg_match_all('/(?:^|[\s;{}])use\s+([a-zA-Z0-9_\\\\]+)(?:\s+as\s+([a-zA-Z0-9_]+))?\s*;/m', $content, $phpUseMatches, PREG_SET_ORDER | PREG_OFFSET_CAPTURE)) {
+            foreach ($phpUseMatches as $m) {
+                $targetClass = $m[1][0];
+                $alias = !empty($m[2][0]) ? $m[2][0] : class_basename($targetClass);
+                $offset = $m[0][1];
+                $line = substr_count(substr($content, 0, $offset), "\n") + 1;
+                if (!isset($uses[$alias])) {
+                    $uses[$alias] = [
+                        'alias' => $alias,
+                        'class' => '\\' . ltrim($targetClass, '\\'),
+                        'line' => $line,
+                    ];
+                }
+            }
+        }
+
+        return $uses;
+    }
+
+    /**
+     * @return array<string, array{alias: string, class: string, line: int}>
+     */
+    protected function extractPhpUseStatements(string $code, int $startLine): array
+    {
+        $uses = [];
+        $stmts = $this->parsePhpStatements($code);
+
+        foreach ($this->nodeFinder->findInstanceOf($stmts, \PhpParser\Node\Stmt\Use_::class) as $useStmt) {
+            foreach ($useStmt->uses as $useUse) {
+                $className = $useUse->name->toString();
+                $alias = $useUse->alias ? $useUse->alias->toString() : class_basename($className);
+                $line = $this->lineForPhpNode($code, $useUse, $startLine);
+
+                $uses[$alias] = [
+                    'alias' => $alias,
+                    'class' => '\\' . ltrim($className, '\\'),
+                    'line' => $line,
+                ];
+            }
+        }
+
+        foreach ($this->nodeFinder->findInstanceOf($stmts, \PhpParser\Node\Stmt\GroupUse::class) as $groupUse) {
+            $prefix = $groupUse->prefix->toString();
+            foreach ($groupUse->uses as $useUse) {
+                $className = $prefix . '\\' . $useUse->name->toString();
+                $alias = $useUse->alias ? $useUse->alias->toString() : class_basename($className);
+                $line = $this->lineForPhpNode($code, $useUse, $startLine);
+
+                $uses[$alias] = [
+                    'alias' => $alias,
+                    'class' => '\\' . ltrim($className, '\\'),
+                    'line' => $line,
+                ];
             }
         }
 
@@ -612,7 +705,7 @@ class BladeAstAnalyzer
         return $rawArgs;
     }
 
-    protected function inferTypeFromExprNode(Expr $expr, array $localScope = [], array $importedUses = []): string
+    public function inferTypeFromExprNode(Expr $expr, array $localScope = [], array $importedUses = []): string
     {
         if ($expr instanceof Variable && is_string($expr->name)) {
             $varName = $expr->name;
@@ -641,6 +734,26 @@ class BladeAstAnalyzer
         }
 
         if ($expr instanceof Array_) {
+            if (empty($expr->items)) {
+                return 'array';
+            }
+
+            $shapeParts = [];
+            $allStringKeys = true;
+            foreach ($expr->items as $item) {
+                if ($item === null || !($item->key instanceof String_)) {
+                    $allStringKeys = false;
+                    break;
+                }
+                $keyName = $item->key->value;
+                $valType = $this->inferTypeFromExprNode($item->value, $localScope, $importedUses);
+                $shapeParts[] = "{$keyName}: {$valType}";
+            }
+
+            if ($allStringKeys && !empty($shapeParts)) {
+                return 'array{' . implode(', ', $shapeParts) . '}';
+            }
+
             return 'array';
         }
 
@@ -864,12 +977,28 @@ class BladeAstAnalyzer
             if ($fnName === 'tap' && !empty($expr->args[0])) {
                 return $this->inferTypeFromExprNode($expr->args[0]->value, $localScope, $importedUses);
             }
-            return match ($fnName) {
-                'now', 'today' => '\\Illuminate\\Support\\Carbon',
-                'collect' => '\\Illuminate\\Support\\Collection',
-                default => 'mixed',
-            };
+            if ($fnName === 'fluent' && !empty($expr->args[0])) {
+                $innerType = $this->inferTypeFromExprNode($expr->args[0]->value, $localScope, $importedUses);
+                return $innerType !== 'mixed' ? "\\Illuminate\\Support\\Fluent<{$innerType}>" : '\\Illuminate\\Support\\Fluent';
+            }
+
+            $firstArg = null;
+            if (!empty($expr->args[0])) {
+                if ($expr->args[0]->value instanceof String_) {
+                    $firstArg = $expr->args[0]->value->value;
+                } elseif ($expr->args[0]->value instanceof Node\Expr\ClassConstFetch && $expr->args[0]->value->class instanceof Name) {
+                    $firstArg = $expr->args[0]->value->class->toString();
+                } else {
+                    $firstArg = '$dynamic';
+                }
+            }
+
+            $argCount = count($expr->args);
+            $resolved = $this->functionTypeResolver->resolve($fnName, $firstArg, null, $argCount);
+
+            return $resolved ?: 'mixed';
         }
+
 
         return 'mixed';
     }
