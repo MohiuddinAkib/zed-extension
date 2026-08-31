@@ -1,0 +1,70 @@
+{
+    "name": "laravel/lsp",
+    "description": "The Laravel language server.",
+    "keywords": [
+        "laravel",
+        "language-server",
+        "lsp",
+        "php"
+    ],
+    "homepage": "https://github.com/laravel/lsp",
+    "type": "project",
+    "license": "MIT",
+    "support": {
+        "issues": "https://github.com/laravel/lsp/issues",
+        "source": "https://github.com/laravel/lsp"
+    },
+    "authors": [
+        {
+            "name": "Laravel"
+        }
+    ],
+    "require": {
+        "php": "^8.2.0"
+    },
+    "require-dev": {
+        "amphp/amp": "^3.0",
+        "amphp/byte-stream": "^2.1",
+        "laravel-zero/framework": "^12.0",
+        "laravel/pint": "^1.15.2",
+        "microsoft/tolerant-php-parser": "^0.1.2",
+        "mockery/mockery": "^1.6.11",
+        "pestphp/pest": "^4.0",
+        "phpstan/phpdoc-parser": "^2.3",
+        "stillat/blade-parser": "^2.1"
+    },
+    "autoload": {
+        "psr-4": {
+            "App\\": "app/"
+        },
+        "exclude-from-classmap": [
+            "app/Lsp/Data/Templates/global.php"
+        ]
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "Tests\\": "tests/"
+        },
+        "exclude-from-classmap": [
+            "tests/snippets/"
+        ]
+    },
+    "config": {
+        "preferred-install": "dist",
+        "sort-packages": true,
+        "optimize-autoloader": true,
+        "allow-plugins": {
+            "pestphp/pest-plugin": true
+        }
+    },
+    "minimum-stability": "stable",
+    "prefer-stable": true,
+    "bin": [
+        "builds/laravel-lsp"
+    ],
+    "scripts": {
+        "pre-autoload-dump": [
+            "test -f fix-class-resolutions.php && php fix-class-resolutions.php || true"
+        ]
+    }
+}
