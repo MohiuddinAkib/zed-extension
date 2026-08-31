@@ -1,6 +1,14 @@
 ## Introduction
 
-The Laravel Zed extension integrates the [Laravel LSP](https://github.com/laravel/lsp) server with Zed, providing completions, hover information, diagnostics, links, and code actions for your PHP and Blade files.
+Laravel Akib is a local playground fork of the official Laravel Zed extension.
+It integrates the [Laravel LSP](https://github.com/laravel/lsp) server with Zed,
+providing completions, hover information, diagnostics, links, and code actions
+for PHP and Blade files.
+
+The immediate goal is to keep the Zed extension wrapper small while moving deeper
+Laravel and Blade intelligence into Laravel LSP or a compatible language server.
+See [ROADMAP.md](ROADMAP.md) for the planned Blade, component, mailable,
+notification, Livewire, Filament, and Inertia work.
 
 ## LSP Documentation
 
@@ -8,7 +16,8 @@ Documentation for Laravel LSP can be found in the [Laravel LSP repository](https
 
 ## Installation
 
-Open the Extensions page from the Zed command palette with `zed: extensions`, search for **Laravel (Official)**, and select **Install**.
+For local development, install this repository as a Zed dev extension.
+The extension name is **Laravel Akib**.
 
 ## Configuration
 
@@ -20,6 +29,10 @@ To pass initialization options directly to the Laravel LSP server, configure `ls
 {
   "lsp": {
     "laravel": {
+      "binary": {
+        "path": "php",
+        "arguments": ["/path/to/laravel-zed-extension/server/server", "lsp"]
+      },
       "initialization_options": {
         "phpEnvironment": "sail"
       }
@@ -35,10 +48,10 @@ For the full list of available configuration options, see the [Laravel LSP repos
 The extension checks for Laravel LSP updates at most once every two hours. On macOS, you can force an update check without waiting by removing the `.last-update-check` file:
 
 ```bash
-rm "$HOME/Library/Application Support/Zed/extensions/work/laravel-official/laravel-lsp/.last-update-check"
+rm "$HOME/Library/Application Support/Zed/extensions/work/laravel-akib/laravel-lsp/.last-update-check"
 ```
 
-Then run `editor: restart language server` from the command palette. This forces an update check, not necessarily a download. The extension downloads the latest release only when its binary is not already installed. This update mechanism is bypassed when a custom LSP binary is configured.
+Then run `editor: restart language server` from the command palette. This forces an update check, not necessarily a download. The extension downloads the latest release only when its binary is not already installed. This update mechanism is bypassed when a custom LSP binary is configured or when bundled with the extension.
 
 ## Contributing
 

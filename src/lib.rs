@@ -40,6 +40,11 @@ impl zed::Extension for LaravelExtension {
             }
         }
 
+        if let Some(mut bundled_command) = find_bundled_server() {
+            bundled_command.env = worktree.shell_env();
+            return Ok(bundled_command);
+        }
+
         let command = match install_or_find_laravel_lsp(language_server_id) {
             Ok(command) => {
                 zed::set_language_server_installation_status(
@@ -75,6 +80,47 @@ impl zed::Extension for LaravelExtension {
 
         Ok(LspSettings::for_worktree(LANGUAGE_SERVER_ID, worktree)?.initialization_options)
     }
+}
+
+fn find_bundled_server() -> Option<zed::Command> {
+    find_bundled_server_in_path(Path::new("."))
+}
+
+fn find_bundled_server_in_path(base_dir: &Path) -> Option<zed::Command> {
+    let bundled_server = base_dir.join("server/server");
+    if fs::metadata(&bundled_server).is_ok() {
+        return Some(zed::Command {
+            command: "php".to_string(),
+            args: vec![
+                bundled_server.to_string_lossy().into_owned(),
+                "lsp".to_string(),
+            ],
+            env: Vec::new(),
+        });
+    }
+
+    let bundled_artisan = base_dir.join("server/artisan");
+    if fs::metadata(&bundled_artisan).is_ok() {
+        return Some(zed::Command {
+            command: "php".to_string(),
+            args: vec![
+                bundled_artisan.to_string_lossy().into_owned(),
+                "lsp".to_string(),
+            ],
+            env: Vec::new(),
+        });
+    }
+
+    let bundled_binary = base_dir.join("server/builds/laravel-lsp");
+    if fs::metadata(&bundled_binary).is_ok() {
+        return Some(zed::Command {
+            command: bundled_binary.to_string_lossy().into_owned(),
+            args: Vec::new(),
+            env: Vec::new(),
+        });
+    }
+
+    None
 }
 
 fn install_or_find_laravel_lsp(language_server_id: &LanguageServerId) -> Result<String> {
@@ -437,6 +483,31 @@ mod tests {
         assert!(!old_binary_path.exists());
         assert!(!old_binary_path.parent().unwrap().exists());
         assert!(!orphaned_file_path.exists());
+    }
+
+    #[test]
+    fn finds_bundled_artisan_server() {
+        let test_dir = TestDir::new("bundled-artisan");
+        let server_dir = test_dir.path().join("server");
+        fs::create_dir_all(&server_dir).unwrap();
+        fs::write(server_dir.join("artisan"), "#!/usr/bin/env php").unwrap();
+
+        let cmd = find_bundled_server_in_path(test_dir.path()).expect("bundled artisan command expected");
+        assert_eq!(cmd.command, "php");
+        assert_eq!(cmd.args, vec![server_dir.join("artisan").to_string_lossy().into_owned(), "lsp".to_string()]);
+    }
+
+    #[test]
+    fn finds_bundled_binary_server() {
+        let test_dir = TestDir::new("bundled-binary");
+        let builds_dir = test_dir.path().join("server/builds");
+        fs::create_dir_all(&builds_dir).unwrap();
+        let bin_path = builds_dir.join("laravel-lsp");
+        fs::write(&bin_path, "bin").unwrap();
+
+        let cmd = find_bundled_server_in_path(test_dir.path()).expect("bundled binary command expected");
+        assert_eq!(cmd.command, bin_path.to_string_lossy().into_owned());
+        assert!(cmd.args.is_empty());
     }
 
     fn create_managed_binary(managed_binary_dir: &Path, version: &str) -> PathBuf {

@@ -1,9 +1,9 @@
-id = "laravel-official"
-name = "Laravel (Official)"
-description = "Official Laravel LSP integration."
+id = "laravel-akib"
+name = "Laravel Akib"
+description = "Local Laravel LSP playground for deeper Blade, component, and Laravel ecosystem intelligence."
 version = "0.1.0"
 schema_version = 1
-authors = ["Laravel"]
+authors = ["Akib", "Laravel"]
 repository = "https://github.com/laravel/zed-extension"
 
 [language_servers.laravel]
