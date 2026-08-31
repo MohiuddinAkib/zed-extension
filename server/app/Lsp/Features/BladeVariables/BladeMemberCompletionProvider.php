@@ -20,6 +20,34 @@ use Throwable;
 
 class BladeMemberCompletionProvider implements CompletionProvider
 {
+    public const HIGHER_ORDER_COLLECTION_PROXIES = [
+        'average' => 'Calculate average value by property/method across items',
+        'avg' => 'Calculate average value by property/method across items',
+        'contains' => 'Determine if any item matches the condition or property',
+        'each' => 'Execute a callback / method on each item',
+        'every' => 'Verify that all items match the condition or property',
+        'filter' => 'Filter items using a method or truthy property',
+        'first' => 'Get the first item matching the property/method',
+        'flatMap' => 'Map a collection and flatten the result',
+        'groupBy' => 'Group collection items by property or method',
+        'keyBy' => 'Key collection items by property or method',
+        'map' => 'Transform each item via property access or method call',
+        'max' => 'Get maximum value by property/method across items',
+        'min' => 'Get minimum value by property/method across items',
+        'partition' => 'Separate items into two collections by condition',
+        'reject' => 'Filter out items using a method or truthy property',
+        'skipUntil' => 'Skip items until condition or property is met',
+        'skipWhile' => 'Skip items while condition or property is met',
+        'some' => 'Determine if any item matches the condition or property',
+        'sortBy' => 'Sort items by property or method in ascending order',
+        'sortByDesc' => 'Sort items by property or method in descending order',
+        'sum' => 'Sum property or method values across items',
+        'takeUntil' => 'Take items until condition or property is met',
+        'takeWhile' => 'Take items while condition or property is met',
+        'unique' => 'Filter collection so only unique items by property remain',
+        'until' => 'Take items until condition or property is met',
+    ];
+
     protected BladeAstAnalyzer $bladeAnalyzer;
     protected BladeScopeResolver $scopeResolver;
     protected DocBlockParser $docBlockParser;
@@ -85,7 +113,27 @@ class BladeMemberCompletionProvider implements CompletionProvider
                 $targetType = $this->resolveChainedType($rootType, $chain);
             }
         }
-        // 4. Helper calls: auth()->, request()->, session()->, now()->, today()->
+        // 4. Tap helper: tap($var)-> or tap(new Class())->
+        elseif (preg_match('/tap\s*\(\s*(?:\$([a-zA-Z0-9_]+)|new\s+([a-zA-Z0-9_\\\\]+)(?:\([^\)]*\))?)\s*\)((?:(?:->|\?->)[a-zA-Z0-9_]+(?:\([^\)]*\))?)*)(?:->|\?->)([a-zA-Z0-9_]*)$/', $text, $matches)) {
+            $varName = $matches[1];
+            $newClass = $matches[2];
+            $chain = $matches[3];
+            $memberPrefix = $matches[4];
+
+            if ($varName !== '') {
+                $viewKey = $this->resolveViewKey($document->uri);
+                $variables = $this->collectVariablesForView($document, $viewKey, $position);
+                if (isset($variables[$varName])) {
+                    $varType = $variables[$varName]['type'] ?? 'mixed';
+                    $varType = $this->qualifyType($varType, $document);
+                    $targetType = $this->resolveChainedType($varType, $chain);
+                }
+            } elseif ($newClass !== '') {
+                $rootType = $this->qualifyType($newClass, $document);
+                $targetType = $this->resolveChainedType($rootType, $chain);
+            }
+        }
+        // 5. Helper calls: auth()->, request()->, session()->, now()->, today()->
         elseif (preg_match('/(auth|request|session|now|today)\s*\(\s*\)((?:(?:->|\?->)[a-zA-Z0-9_]+(?:\([^\)]*\))?)*)(?:->|\?->)([a-zA-Z0-9_]*)$/', $text, $matches)) {
             $helperName = $matches[1];
             $chain = $matches[2];
@@ -101,7 +149,7 @@ class BladeMemberCompletionProvider implements CompletionProvider
                 $targetType = $this->resolveChainedType($rootType, $chain);
             }
         }
-        // 5. Object member access: $var-> or $var?-> or $var->chain->
+        // 6. Object member access: $var-> or $var?-> or $var->chain->
         elseif (preg_match('/\$([a-zA-Z0-9_]+)((?:(?:->|\?->)[a-zA-Z0-9_]+(?:\([^\)]*\))?)*)(?:->|\?->)([a-zA-Z0-9_]*)$/', $text, $matches)) {
             $varName = $matches[1];
             $chain = $matches[2];
@@ -115,7 +163,7 @@ class BladeMemberCompletionProvider implements CompletionProvider
                 $targetType = $this->resolveChainedType($varType, $chain);
             }
         }
-        // 6. Array key access: $var[' or $var[" or $var[ or $var['key']['
+        // 7. Array key access: $var[' or $var[" or $var[ or $var['key']['
         elseif (preg_match('/\$([a-zA-Z0-9_]+)((?:(?:->|\?->)[a-zA-Z0-9_]+(?:\([^\)]*\))?|\[[^\]]*\])*)\[([\'"]?)([a-zA-Z0-9_]*)$/', $text, $matches)) {
             $isArrayAccess = true;
             $varName = $matches[1];
@@ -131,7 +179,7 @@ class BladeMemberCompletionProvider implements CompletionProvider
                 $targetType = $this->resolveChainedType($varType, $chain);
             }
         } else {
-            // 7. Global Facades and @use class suggestions in expression context
+            // 8. Global Facades and @use class suggestions in expression context
             return $this->getExpressionClassCompletions($document, $text, $lineNumber, $character);
         }
 
@@ -294,6 +342,28 @@ class BladeMemberCompletionProvider implements CompletionProvider
             }
         }
 
+        // 4. Collection Higher Order Proxies
+        if ($this->isCollectionType($type)) {
+            $itemType = $this->extractCollectionItemType($type) ?? 'mixed';
+            $shortItemType = class_basename($itemType);
+            foreach (self::HIGHER_ORDER_COLLECTION_PROXIES as $proxyName => $proxyDesc) {
+                $members[$proxyName] = [
+                    'name' => $proxyName,
+                    'kind' => 10, // Property
+                    'detail' => "HigherOrderCollectionProxy<{$shortItemType}>",
+                    'documentation' => "**Higher Order Collection Proxy (`{$proxyName}`)**\n\n```php\n\$collection->{$proxyName}->...\n```\n\n{$proxyDesc}.\n\n*Target Item Type:* `{$itemType}`",
+                ];
+            }
+        }
+
+        // 5. Higher Order Tap Proxy
+        $members['tap'] = [
+            'name' => 'tap',
+            'kind' => 10, // Property
+            'detail' => "HigherOrderTapProxy<" . class_basename($cleanType) . ">",
+            'documentation' => "**Higher Order Tap Proxy**\n\n```php\n\$var->tap()->... or \$var->tap->...\n```\n\nPasses the target object into a closure and returns it.",
+        ];
+
         if (!class_exists($baseClass) && !interface_exists($baseClass) && !enum_exists($baseClass)) {
             return $members;
         }
@@ -435,6 +505,22 @@ class BladeMemberCompletionProvider implements CompletionProvider
         $currentType = $rootType;
         if (preg_match_all('/(?:->|\?->|\[\s*[\'"]?)([a-zA-Z0-9_]+)(?:[\'"]?\s*\]|\([^\)]*\))?/', $chain, $m)) {
             foreach ($m[1] as $member) {
+                // Higher order tap proxy
+                if ($member === 'tap') {
+                    continue;
+                }
+
+                // Higher order collection proxy access (e.g. $users->map->, $users->each->, $users->filter->)
+                if (isset(self::HIGHER_ORDER_COLLECTION_PROXIES[$member])) {
+                    if ($this->isCollectionType($currentType)) {
+                        $itemType = $this->extractCollectionItemType($currentType);
+                        if ($itemType !== null) {
+                            $currentType = $itemType;
+                            continue;
+                        }
+                    }
+                }
+
                 // If currentType is Collection/Paginator and accessing element
                 if (in_array($member, ['first', 'last', 'random', 'pop', 'shift', 'sole', 'value'], true)) {
                     if (preg_match('/(?:Collection|LengthAwarePaginator|Paginator)<(?:[^,]+,\s*)?([^>]+)>/', $currentType, $matchItem)) {
@@ -465,6 +551,44 @@ class BladeMemberCompletionProvider implements CompletionProvider
         }
 
         return $currentType;
+    }
+
+    protected function isCollectionType(string $type): bool
+    {
+        $cleanType = ltrim(preg_replace('/\|null|\?/', '', $type), '\\');
+        $baseClass = preg_replace('/<.*>$/', '', $cleanType);
+        $baseClass = ltrim(preg_replace('/\[\]$/', '', $baseClass), '\\');
+
+        if (in_array($baseClass, [
+            'Illuminate\Database\Eloquent\Collection',
+            'Illuminate\Support\Collection',
+            'Illuminate\Support\LazyCollection',
+            'Illuminate\Support\Enumerable',
+            'Collection',
+            'LazyCollection',
+        ], true)) {
+            return true;
+        }
+
+        if (class_exists($baseClass) && (
+            is_subclass_of($baseClass, 'Illuminate\Support\Enumerable') ||
+            is_subclass_of($baseClass, 'Illuminate\Support\Collection')
+        )) {
+            return true;
+        }
+
+        return false;
+    }
+
+    protected function extractCollectionItemType(string $type): ?string
+    {
+        $cleanType = ltrim(preg_replace('/\|null|\?/', '', $type), '\\');
+
+        if (preg_match('/(?:Collection|Enumerable|LazyCollection|Paginator)<(?:[^,]+,\s*)?([^>]+)>/i', $cleanType, $m)) {
+            return trim($m[1]);
+        }
+
+        return null;
     }
 
     /**

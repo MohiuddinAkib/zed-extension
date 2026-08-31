@@ -669,8 +669,81 @@ class BladeAstAnalyzer
             return $className;
         }
 
+        if ($expr instanceof \PhpParser\Node\Expr\PropertyFetch && $expr->name instanceof Identifier) {
+            $propName = $expr->name->toString();
+            $parentType = $this->inferTypeFromExprNode($expr->var, $localScope, $importedUses);
+
+            // If accessing property on higher-order proxy: $users->map->name, $users->first->name
+            if ($expr->var instanceof \PhpParser\Node\Expr\PropertyFetch && $expr->var->name instanceof Identifier) {
+                $proxyName = $expr->var->name->toString();
+                $collectionType = $this->inferTypeFromExprNode($expr->var->var, $localScope, $importedUses);
+
+                if (in_array($proxyName, ['map', 'flatMap'], true)) {
+                    return '\\Illuminate\\Support\\Collection';
+                }
+
+                if (in_array($proxyName, ['each', 'filter', 'reject', 'sortBy', 'sortByDesc', 'unique', 'values'], true)) {
+                    return $collectionType;
+                }
+
+                if (in_array($proxyName, ['first'], true)) {
+                    if (preg_match('/(?:Collection|Enumerable|LazyCollection|Paginator)<(?:[^,]+,\s*)?([^>]+)>/i', $collectionType, $m)) {
+                        return trim($m[1]);
+                    }
+                    return 'mixed';
+                }
+
+                if (in_array($proxyName, ['sum', 'avg', 'average', 'max', 'min'], true)) {
+                    return 'int|float';
+                }
+
+                if (in_array($proxyName, ['every', 'contains', 'some'], true)) {
+                    return 'bool';
+                }
+            }
+
+            // Direct proxy access on collection: $users->map, $users->each
+            if (in_array($propName, ['map', 'each', 'filter', 'reject', 'sortBy', 'sortByDesc', 'sum', 'avg', 'min', 'max', 'keyBy', 'groupBy', 'unique', 'first', 'every', 'contains', 'flatMap', 'partition'], true)) {
+                if (preg_match('/(?:Collection|Enumerable|LazyCollection|Paginator)<(?:[^,]+,\s*)?([^>]+)>/i', $parentType, $m)) {
+                    $itemType = trim($m[1]);
+                    return "\\Illuminate\\Support\\HigherOrderCollectionProxy<{$itemType}>";
+                }
+                return '\\Illuminate\\Support\\HigherOrderCollectionProxy';
+            }
+
+            if ($propName === 'tap') {
+                return "\\Illuminate\\Support\\HigherOrderTapProxy<{$parentType}>";
+            }
+        }
+
         if ($expr instanceof \PhpParser\Node\Expr\MethodCall && $expr->name instanceof Identifier) {
             $methodName = $expr->name->toString();
+
+            // If calling method on higher order proxy: $users->each->delete(), $users->filter->isActive()
+            if ($expr->var instanceof \PhpParser\Node\Expr\PropertyFetch && $expr->var->name instanceof Identifier) {
+                $proxyName = $expr->var->name->toString();
+                $collectionType = $this->inferTypeFromExprNode($expr->var->var, $localScope, $importedUses);
+
+                if (in_array($proxyName, ['map', 'flatMap'], true)) {
+                    return '\\Illuminate\\Support\\Collection';
+                }
+
+                if (in_array($proxyName, ['each', 'filter', 'reject', 'sortBy', 'sortByDesc', 'unique', 'values'], true)) {
+                    return $collectionType;
+                }
+
+                if (in_array($proxyName, ['first'], true)) {
+                    if (preg_match('/(?:Collection|Enumerable|LazyCollection|Paginator)<(?:[^,]+,\s*)?([^>]+)>/i', $collectionType, $m)) {
+                        return trim($m[1]);
+                    }
+                    return 'mixed';
+                }
+
+                if (in_array($proxyName, ['every', 'contains', 'some'], true)) {
+                    return 'bool';
+                }
+            }
+
             $parentType = $this->inferTypeFromExprNode($expr->var, $localScope, $importedUses);
 
             if (in_array($methodName, ['first', 'last', 'random', 'pop', 'shift', 'sole', 'value'], true)) {
@@ -704,7 +777,11 @@ class BladeAstAnalyzer
         }
 
         if ($expr instanceof FuncCall && $expr->name instanceof Name) {
-            return match ($expr->name->toString()) {
+            $fnName = $expr->name->toString();
+            if ($fnName === 'tap' && !empty($expr->args[0])) {
+                return $this->inferTypeFromExprNode($expr->args[0]->value, $localScope, $importedUses);
+            }
+            return match ($fnName) {
                 'now', 'today' => '\\Illuminate\\Support\\Carbon',
                 'collect' => '\\Illuminate\\Support\\Collection',
                 default => 'mixed',

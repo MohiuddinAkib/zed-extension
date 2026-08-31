@@ -20,6 +20,34 @@ use Throwable;
 
 class BladeMemberHoverProvider implements HoverProvider
 {
+    public const HIGHER_ORDER_COLLECTION_PROXIES = [
+        'average' => 'Calculate average value by property/method across items',
+        'avg' => 'Calculate average value by property/method across items',
+        'contains' => 'Determine if any item matches the condition or property',
+        'each' => 'Execute a callback / method on each item',
+        'every' => 'Verify that all items match the condition or property',
+        'filter' => 'Filter items using a method or truthy property',
+        'first' => 'Get the first item matching the property/method',
+        'flatMap' => 'Map a collection and flatten the result',
+        'groupBy' => 'Group collection items by property or method',
+        'keyBy' => 'Key collection items by property or method',
+        'map' => 'Transform each item via property access or method call',
+        'max' => 'Get maximum value by property/method across items',
+        'min' => 'Get minimum value by property/method across items',
+        'partition' => 'Separate items into two collections by condition',
+        'reject' => 'Filter out items using a method or truthy property',
+        'skipUntil' => 'Skip items until condition or property is met',
+        'skipWhile' => 'Skip items while condition or property is met',
+        'some' => 'Determine if any item matches the condition or property',
+        'sortBy' => 'Sort items by property or method in ascending order',
+        'sortByDesc' => 'Sort items by property or method in descending order',
+        'sum' => 'Sum property or method values across items',
+        'takeUntil' => 'Take items until condition or property is met',
+        'takeWhile' => 'Take items while condition or property is met',
+        'unique' => 'Filter collection so only unique items by property remain',
+        'until' => 'Take items until condition or property is met',
+    ];
+
     protected BladeAstAnalyzer $bladeAnalyzer;
     protected BladePhpAstAnalyzer $bladePhpAstAnalyzer;
     protected BladeScopeResolver $scopeResolver;
@@ -96,7 +124,17 @@ class BladeMemberHoverProvider implements HoverProvider
         $varSource = null;
         $varLine = null;
 
-        if ($rootCall === 'class') {
+        if ($rootCall === 'tap') {
+            $rootArg = $rootCallArg ?? '';
+            if ($varName !== '' && isset($variables[$varName])) {
+                $rootType = $variables[$varName]['type'] ?? 'mixed';
+                $rootType = $this->qualifyType($rootType, $document);
+                $varSource = $variables[$varName]['source'] ?? null;
+                $varLine = $variables[$varName]['line'] ?? null;
+            } elseif ($rootArg !== '') {
+                $rootType = $this->qualifyType($rootArg, $document);
+            }
+        } elseif ($rootCall === 'class') {
             $rootClass = $rootCallArg ?: $varName;
             $importedUses = $this->bladeAnalyzer->extractUseDirectives($document->content);
             if (isset($importedUses[$rootClass])) {
@@ -246,7 +284,42 @@ class BladeMemberHoverProvider implements HoverProvider
             }
         }
 
-        // 2. Match helpers (auth(), request(), session(), now(), today())
+        // 2. Match tap helper: tap($var) or tap(new Class())
+        if (preg_match_all('/tap\s*\(\s*(?:\$([a-zA-Z0-9_]+)|new\s+([a-zA-Z0-9_\\\\]+)(?:\([^\)]*\))?)\s*\)((?:(?:->|\?->)[a-zA-Z0-9_]+(?:\([^\)]*\))?|\[[^\]]*\])+)/', $line, $matches, PREG_OFFSET_CAPTURE | PREG_SET_ORDER)) {
+            foreach ($matches as $m) {
+                $varName = !empty($m[1][0]) ? $m[1][0] : '';
+                $newClass = !empty($m[2][0]) ? $m[2][0] : '';
+                $fullChain = $m[3][0];
+                $chainOffset = $m[3][1];
+
+                if (preg_match_all('/(?:(->|\?->)([a-zA-Z0-9_]+)|\[\s*([\'"]?)([a-zA-Z0-9_]+)\3\s*\])/', $fullChain, $segments, PREG_OFFSET_CAPTURE | PREG_SET_ORDER)) {
+                    $accumulatedChain = '';
+                    foreach ($segments as $seg) {
+                        $isObject = !empty($seg[1][0]);
+                        $memberName = $isObject ? $seg[2][0] : $seg[4][0];
+                        $memberOffset = $chainOffset + ($isObject ? $seg[2][1] : $seg[4][1]);
+                        $memberEnd = $memberOffset + strlen($memberName);
+
+                        if ($character >= $memberOffset && $character <= $memberEnd) {
+                            return [
+                                'varName' => $varName,
+                                'rootCall' => 'tap',
+                                'rootCallArg' => $newClass ?: $varName,
+                                'chain' => $accumulatedChain,
+                                'memberName' => $memberName,
+                                'isArrayAccess' => !$isObject,
+                                'start' => $memberOffset,
+                                'end' => $memberEnd,
+                            ];
+                        }
+
+                        $accumulatedChain .= $seg[0][0];
+                    }
+                }
+            }
+        }
+
+        // 3. Match helpers (auth(), request(), session(), now(), today())
         if (preg_match_all('/(auth|request|session|now|today)\s*\(\s*\)((?:(?:->|\?->)[a-zA-Z0-9_]+(?:\([^\)]*\))?|\[[^\]]*\])+)/', $line, $matches, PREG_OFFSET_CAPTURE | PREG_SET_ORDER)) {
             foreach ($matches as $m) {
                 $helperName = $m[1][0];
@@ -280,7 +353,7 @@ class BladeMemberHoverProvider implements HoverProvider
             }
         }
 
-        // 3. Match variable access chains
+        // 4. Match variable access chains
         if (preg_match_all('/\$([a-zA-Z0-9_]+)((?:(?:->|\?->)[a-zA-Z0-9_]+(?:\([^\)]*\))?|\[[^\]]*\])+)/', $line, $matches, PREG_OFFSET_CAPTURE | PREG_SET_ORDER)) {
             foreach ($matches as $m) {
                 $varName = $m[1][0];
@@ -406,6 +479,35 @@ class BladeMemberHoverProvider implements HoverProvider
                     ];
                 }
             }
+        }
+
+        // 4. Collection Higher Order Proxies
+        if ($this->isCollectionType($type) && isset(self::HIGHER_ORDER_COLLECTION_PROXIES[$memberName])) {
+            $itemType = $this->extractCollectionItemType($type) ?? 'mixed';
+            $shortItemType = class_basename($itemType);
+            $doc = self::HIGHER_ORDER_COLLECTION_PROXIES[$memberName];
+            return [
+                'title' => "Higher Order Collection Proxy ({$memberName})",
+                'type' => "HigherOrderCollectionProxy<{$shortItemType}>",
+                'origin' => 'Laravel Higher Order Message',
+                'documentation' => "**Higher Order Collection Proxy (`{$memberName}`)**\n\n```php\n\$collection->{$memberName}->...\n```\n\n{$doc}.\n\n*Target Item Type:* `{$itemType}`",
+                'isMethod' => false,
+                'source' => null,
+                'line' => null,
+            ];
+        }
+
+        // 5. Higher Order Tap Proxy
+        if ($memberName === 'tap') {
+            return [
+                'title' => 'Higher Order Tap Proxy',
+                'type' => "HigherOrderTapProxy<" . class_basename($cleanType) . ">",
+                'origin' => 'Laravel Higher Order Message',
+                'documentation' => "**Higher Order Tap Proxy**\n\n```php\n\$var->tap()->... or \$var->tap->...\n```\n\nPasses the target object into a closure and returns it.",
+                'isMethod' => false,
+                'source' => null,
+                'line' => null,
+            ];
         }
 
         if (!class_exists($baseClass) && !interface_exists($baseClass) && !enum_exists($baseClass)) {
@@ -701,6 +803,22 @@ class BladeMemberHoverProvider implements HoverProvider
         $currentType = $rootType;
         if (preg_match_all('/(?:->|\?->|\[\s*[\'"]?)([a-zA-Z0-9_]+)(?:[\'"]?\s*\]|\([^\)]*\))?/', $chain, $m)) {
             foreach ($m[1] as $member) {
+                // Higher order tap proxy
+                if ($member === 'tap') {
+                    continue;
+                }
+
+                // Higher order collection proxy access (e.g. $users->map->, $users->each->, $users->filter->)
+                if (isset(self::HIGHER_ORDER_COLLECTION_PROXIES[$member])) {
+                    if ($this->isCollectionType($currentType)) {
+                        $itemType = $this->extractCollectionItemType($currentType);
+                        if ($itemType !== null) {
+                            $currentType = $itemType;
+                            continue;
+                        }
+                    }
+                }
+
                 // If currentType is Collection/Paginator and accessing element
                 if (in_array($member, ['first', 'last', 'random', 'pop', 'shift', 'sole', 'value'], true)) {
                     if (preg_match('/(?:Collection|LengthAwarePaginator|Paginator)<(?:[^,]+,\s*)?([^>]+)>/', $currentType, $matchItem)) {
@@ -724,6 +842,44 @@ class BladeMemberHoverProvider implements HoverProvider
         }
 
         return $currentType;
+    }
+
+    protected function isCollectionType(string $type): bool
+    {
+        $cleanType = ltrim(preg_replace('/\|null|\?/', '', $type), '\\');
+        $baseClass = preg_replace('/<.*>$/', '', $cleanType);
+        $baseClass = ltrim(preg_replace('/\[\]$/', '', $baseClass), '\\');
+
+        if (in_array($baseClass, [
+            'Illuminate\Database\Eloquent\Collection',
+            'Illuminate\Support\Collection',
+            'Illuminate\Support\LazyCollection',
+            'Illuminate\Support\Enumerable',
+            'Collection',
+            'LazyCollection',
+        ], true)) {
+            return true;
+        }
+
+        if (class_exists($baseClass) && (
+            is_subclass_of($baseClass, 'Illuminate\Support\Enumerable') ||
+            is_subclass_of($baseClass, 'Illuminate\Support\Collection')
+        )) {
+            return true;
+        }
+
+        return false;
+    }
+
+    protected function extractCollectionItemType(string $type): ?string
+    {
+        $cleanType = ltrim(preg_replace('/\|null|\?/', '', $type), '\\');
+
+        if (preg_match('/(?:Collection|Enumerable|LazyCollection|Paginator)<(?:[^,]+,\s*)?([^>]+)>/i', $cleanType, $m)) {
+            return trim($m[1]);
+        }
+
+        return null;
     }
 
     /**
