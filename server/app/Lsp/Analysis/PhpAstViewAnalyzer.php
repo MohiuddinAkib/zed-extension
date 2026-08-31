@@ -700,12 +700,29 @@ class PhpAstViewAnalyzer
                         $className = $this->qualifyTypeName($expr->class->toString());
                         $methodName = $expr->name->toString();
 
-                        if (in_array($methodName, ['all', 'get', 'paginate', 'cursor', 'lazy'], true)) {
+                        if (in_array($methodName, ['all', 'get'], true)) {
                             return "\\Illuminate\\Database\\Eloquent\\Collection<int, {$className}>";
                         }
-
-                        if (in_array($methodName, ['find', 'findOrFail', 'first', 'firstOrFail', 'create', 'make', 'query'], true)) {
+                        if (in_array($methodName, ['paginate', 'simplePaginate', 'cursorPaginate'], true)) {
+                            return "\\Illuminate\\Pagination\\LengthAwarePaginator<int, {$className}>";
+                        }
+                        if (in_array($methodName, ['cursor', 'lazy'], true)) {
+                            return "\\Illuminate\\Support\\LazyCollection<int, {$className}>";
+                        }
+                        if (in_array($methodName, ['find', 'findOrFail', 'first', 'firstOrFail', 'create', 'make', 'firstOrCreate', 'updateOrCreate', 'sole'], true)) {
                             return $className;
+                        }
+                        if (in_array($methodName, ['query', 'where', 'whereIn', 'whereNotIn', 'whereNull', 'whereNotNull', 'whereBetween', 'orWhere', 'with', 'without', 'withCount', 'select', 'addSelect', 'latest', 'oldest', 'orderBy', 'orderByDesc', 'groupBy', 'having', 'limit', 'take', 'offset', 'skip', 'when', 'unless', 'scopes', 'withTrashed', 'onlyTrashed', 'withoutTrashed', 'lockForUpdate', 'sharedLock', 'distinct'], true)) {
+                            return "\\Illuminate\\Database\\Eloquent\\Builder<{$className}>";
+                        }
+                        if (in_array($methodName, ['count'], true)) {
+                            return 'int';
+                        }
+                        if (in_array($methodName, ['exists', 'doesntExist'], true)) {
+                            return 'bool';
+                        }
+                        if (in_array($methodName, ['pluck'], true)) {
+                            return '\\Illuminate\\Support\\Collection';
                         }
 
                         return $className;
@@ -714,15 +731,43 @@ class PhpAstViewAnalyzer
 
                 if ($expr instanceof MethodCall && $expr->name instanceof Identifier) {
                     $methodName = $expr->name->toString();
+                    $parentType = $this->inferTypeFromExpr($expr->var);
+
+                    if (\App\Lsp\Features\BladeVariables\EloquentBuilderRegistry::isBuilder($parentType)) {
+                        $modelType = \App\Lsp\Features\BladeVariables\EloquentBuilderRegistry::extractModelFromBuilder($parentType) ?? 'mixed';
+                        if (in_array($methodName, ['get', 'all'], true)) {
+                            return $modelType !== 'mixed' ? "\\Illuminate\\Database\\Eloquent\\Collection<int, {$modelType}>" : '\\Illuminate\\Database\\Eloquent\\Collection';
+                        }
+                        if (in_array($methodName, ['first', 'firstOrFail', 'find', 'findOrFail', 'firstOrCreate', 'updateOrCreate', 'create', 'make', 'sole', 'findOrNew', 'firstOrNew'], true)) {
+                            return $modelType;
+                        }
+                        if (in_array($methodName, ['paginate', 'simplePaginate', 'cursorPaginate'], true)) {
+                            return $modelType !== 'mixed' ? "\\Illuminate\\Pagination\\LengthAwarePaginator<int, {$modelType}>" : '\\Illuminate\\Pagination\\LengthAwarePaginator';
+                        }
+                        if (in_array($methodName, ['cursor', 'lazy'], true)) {
+                            return $modelType !== 'mixed' ? "\\Illuminate\\Support\\LazyCollection<int, {$modelType}>" : '\\Illuminate\\Support\\LazyCollection';
+                        }
+                        if (in_array($methodName, ['where', 'whereIn', 'whereNotIn', 'whereNull', 'whereNotNull', 'whereBetween', 'orWhere', 'with', 'without', 'withCount', 'select', 'addSelect', 'latest', 'oldest', 'orderBy', 'orderByDesc', 'groupBy', 'having', 'limit', 'take', 'offset', 'skip', 'when', 'unless', 'scopes', 'withTrashed', 'onlyTrashed', 'withoutTrashed', 'lockForUpdate', 'sharedLock', 'distinct'], true)) {
+                            return $parentType;
+                        }
+                        if (in_array($methodName, ['count'], true)) {
+                            return 'int';
+                        }
+                        if (in_array($methodName, ['exists', 'doesntExist'], true)) {
+                            return 'bool';
+                        }
+                        if (in_array($methodName, ['pluck'], true)) {
+                            return '\\Illuminate\\Support\\Collection';
+                        }
+                    }
+
                     if (in_array($methodName, ['paginate', 'simplePaginate', 'cursorPaginate'], true)) {
-                        $parentType = $this->inferTypeFromExpr($expr->var);
                         if (preg_match('/Collection<int,\s*([^>]+)>/', $parentType, $m)) {
                             return "\\Illuminate\\Pagination\\LengthAwarePaginator<int, {$m[1]}>";
                         }
                         return '\\Illuminate\\Pagination\\LengthAwarePaginator';
                     }
                     if (in_array($methodName, ['get', 'all'], true)) {
-                        $parentType = $this->inferTypeFromExpr($expr->var);
                         return "\\Illuminate\\Database\\Eloquent\\Collection<int, {$parentType}>";
                     }
                 }

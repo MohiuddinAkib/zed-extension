@@ -510,6 +510,34 @@ class BladeMemberHoverProvider implements HoverProvider
             ];
         }
 
+        // 6. Eloquent Builder & Model query methods
+        $isBuilder = EloquentBuilderRegistry::isBuilder($type);
+        $isModel = EloquentBuilderRegistry::isModel($baseClass, $models);
+        if ($isBuilder || $isModel) {
+            $targetModel = $isBuilder
+                ? (EloquentBuilderRegistry::extractModelFromBuilder($type) ?? $baseClass)
+                : $baseClass;
+
+            if (isset(EloquentBuilderRegistry::BUILDER_METHODS[$memberName])) {
+                $bInfo = EloquentBuilderRegistry::BUILDER_METHODS[$memberName];
+                $modelDisplay = class_basename($targetModel);
+                $fullModel = '\\' . ltrim($targetModel, '\\');
+                $ret = str_replace('Model', $fullModel, $bInfo['return']);
+                $sig = str_replace('Model', $modelDisplay, $bInfo['signature']);
+
+                return [
+                    'title' => "{$modelDisplay}::{$memberName}()",
+                    'type' => $ret,
+                    'origin' => 'Eloquent Builder',
+                    'isMethod' => true,
+                    'signature' => "public function {$memberName}{$sig}: {$ret}",
+                    'documentation' => $bInfo['doc'],
+                    'source' => null,
+                    'line' => null,
+                ];
+            }
+        }
+
         if (!class_exists($baseClass) && !interface_exists($baseClass) && !enum_exists($baseClass)) {
             return null;
         }

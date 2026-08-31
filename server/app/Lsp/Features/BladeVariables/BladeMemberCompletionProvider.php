@@ -416,6 +416,22 @@ class BladeMemberCompletionProvider implements CompletionProvider
             'documentation' => "**Higher Order Tap Proxy**\n\n```php\n\$var->tap()->... or \$var->tap->...\n```\n\nPasses the target object into a closure and returns it.",
         ];
 
+        // 6. Eloquent Builder & Model query methods
+        $isBuilder = EloquentBuilderRegistry::isBuilder($type);
+        $isModel = EloquentBuilderRegistry::isModel($baseClass, $models);
+        if ($isBuilder || $isModel) {
+            $targetModel = $isBuilder
+                ? (EloquentBuilderRegistry::extractModelFromBuilder($type) ?? $baseClass)
+                : $baseClass;
+
+            $builderMembers = EloquentBuilderRegistry::getMembersForModel($targetModel, false);
+            foreach ($builderMembers as $bName => $bMember) {
+                if (!isset($members[$bName])) {
+                    $members[$bName] = $bMember;
+                }
+            }
+        }
+
         if (!class_exists($baseClass) && !interface_exists($baseClass) && !enum_exists($baseClass)) {
             return $members;
         }
@@ -958,6 +974,58 @@ class BladeMemberCompletionProvider implements CompletionProvider
                         }
                     }
                 } catch (\Throwable) {}
+            }
+        }
+
+        // 4. If target class is an Eloquent Model, also provide static Eloquent Builder methods
+        $models = $this->project->index->models();
+        if (EloquentBuilderRegistry::isModel($cleanTarget, $models)) {
+            $builderMembers = EloquentBuilderRegistry::getMembersForModel($cleanTarget, true);
+            foreach ($builderMembers as $bName => $bMember) {
+                if (isset($seenMembers[$bName])) continue;
+                if ($memberPrefix !== '' && !str_starts_with(strtolower($bName), strtolower($memberPrefix))) continue;
+                $seenMembers[$bName] = true;
+
+                $completions[] = [
+                    'label' => $bName,
+                    'labelDetails' => [
+                        'detail' => $bMember['paramSignature'] ?? '()',
+                        'description' => $bMember['returnType'] ?? 'mixed',
+                    ],
+                    'kind' => 2, // Method
+                    'detail' => $bMember['detail'] ?? '',
+                    'insertTextFormat' => 2, // Snippet format
+                    'documentation' => [
+                        'kind' => 'markdown',
+                        'value' => $bMember['documentation'] ?? '',
+                    ],
+                    'textEdit' => [
+                        'range' => $range,
+                        'newText' => $bMember['snippet'] ?? "{$bName}()",
+                    ],
+                ];
+            }
+
+            // Pseudo-constant `class` if not already added
+            if (!isset($seenMembers['class']) && ($memberPrefix === '' || str_starts_with('class', strtolower($memberPrefix)))) {
+                $seenMembers['class'] = true;
+                $completions[] = [
+                    'label' => 'class',
+                    'labelDetails' => [
+                        'description' => "class-string<{$cleanTarget}>",
+                    ],
+                    'kind' => 21, // Constant
+                    'detail' => "class-string<{$cleanTarget}>",
+                    'insertTextFormat' => 1,
+                    'documentation' => [
+                        'kind' => 'markdown',
+                        'value' => "The fully qualified class name of `{$cleanTarget}`.",
+                    ],
+                    'textEdit' => [
+                        'range' => $range,
+                        'newText' => 'class',
+                    ],
+                ];
             }
         }
 

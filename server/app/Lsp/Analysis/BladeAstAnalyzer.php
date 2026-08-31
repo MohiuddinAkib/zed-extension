@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Lsp\Analysis;
 
+use App\Lsp\Features\BladeVariables\EloquentBuilderRegistry;
 use App\Lsp\Semantics\ScopeOrigin;
 use App\Lsp\Semantics\SourceRange;
 use App\Lsp\Semantics\TypeRef;
@@ -660,11 +661,29 @@ class BladeAstAnalyzer
                 : '\\' . ltrim($rawClass, '\\');
 
             $methodName = $expr->name->toString();
-            if (in_array($methodName, ['all', 'get', 'paginate', 'cursor', 'lazy'], true)) {
+            if (in_array($methodName, ['all', 'get'], true)) {
                 return "\\Illuminate\\Database\\Eloquent\\Collection<int, {$className}>";
             }
-            if (in_array($methodName, ['find', 'findOrFail', 'first', 'firstOrFail', 'create', 'make', 'query'], true)) {
+            if (in_array($methodName, ['paginate', 'simplePaginate', 'cursorPaginate'], true)) {
+                return "\\Illuminate\\Pagination\\LengthAwarePaginator<int, {$className}>";
+            }
+            if (in_array($methodName, ['cursor', 'lazy'], true)) {
+                return "\\Illuminate\\Support\\LazyCollection<int, {$className}>";
+            }
+            if (in_array($methodName, ['find', 'findOrFail', 'first', 'firstOrFail', 'create', 'make', 'firstOrCreate', 'updateOrCreate', 'sole'], true)) {
                 return $className;
+            }
+            if (in_array($methodName, ['query', 'where', 'whereIn', 'whereNotIn', 'whereNull', 'whereNotNull', 'whereBetween', 'orWhere', 'with', 'without', 'withCount', 'select', 'addSelect', 'latest', 'oldest', 'orderBy', 'orderByDesc', 'groupBy', 'having', 'limit', 'take', 'offset', 'skip', 'when', 'unless', 'scopes', 'withTrashed', 'onlyTrashed', 'withoutTrashed', 'lockForUpdate', 'sharedLock', 'distinct'], true)) {
+                return "\\Illuminate\\Database\\Eloquent\\Builder<{$className}>";
+            }
+            if (in_array($methodName, ['count'], true)) {
+                return 'int';
+            }
+            if (in_array($methodName, ['exists', 'doesntExist'], true)) {
+                return 'bool';
+            }
+            if (in_array($methodName, ['pluck'], true)) {
+                return '\\Illuminate\\Support\\Collection';
             }
             return $className;
         }
@@ -745,6 +764,35 @@ class BladeAstAnalyzer
             }
 
             $parentType = $this->inferTypeFromExprNode($expr->var, $localScope, $importedUses);
+
+            // If calling method on Builder: $builder->get(), $builder->first(), $builder->where()
+            if (EloquentBuilderRegistry::isBuilder($parentType)) {
+                $modelType = EloquentBuilderRegistry::extractModelFromBuilder($parentType) ?? 'mixed';
+                if (in_array($methodName, ['get', 'all'], true)) {
+                    return $modelType !== 'mixed' ? "\\Illuminate\\Database\\Eloquent\\Collection<int, {$modelType}>" : '\\Illuminate\\Database\\Eloquent\\Collection';
+                }
+                if (in_array($methodName, ['first', 'firstOrFail', 'find', 'findOrFail', 'firstOrCreate', 'updateOrCreate', 'create', 'make', 'sole', 'findOrNew', 'firstOrNew'], true)) {
+                    return $modelType;
+                }
+                if (in_array($methodName, ['paginate', 'simplePaginate', 'cursorPaginate'], true)) {
+                    return $modelType !== 'mixed' ? "\\Illuminate\\Pagination\\LengthAwarePaginator<int, {$modelType}>" : '\\Illuminate\\Pagination\\LengthAwarePaginator';
+                }
+                if (in_array($methodName, ['cursor', 'lazy'], true)) {
+                    return $modelType !== 'mixed' ? "\\Illuminate\\Support\\LazyCollection<int, {$modelType}>" : '\\Illuminate\\Support\\LazyCollection';
+                }
+                if (in_array($methodName, ['where', 'whereIn', 'whereNotIn', 'whereNull', 'whereNotNull', 'whereBetween', 'orWhere', 'with', 'without', 'withCount', 'select', 'addSelect', 'latest', 'oldest', 'orderBy', 'orderByDesc', 'groupBy', 'having', 'limit', 'take', 'offset', 'skip', 'when', 'unless', 'scopes', 'withTrashed', 'onlyTrashed', 'withoutTrashed', 'lockForUpdate', 'sharedLock', 'distinct'], true)) {
+                    return $parentType;
+                }
+                if (in_array($methodName, ['count'], true)) {
+                    return 'int';
+                }
+                if (in_array($methodName, ['exists', 'doesntExist'], true)) {
+                    return 'bool';
+                }
+                if (in_array($methodName, ['pluck'], true)) {
+                    return '\\Illuminate\\Support\\Collection';
+                }
+            }
 
             if (in_array($methodName, ['first', 'last', 'random', 'pop', 'shift', 'sole', 'value'], true)) {
                 if (preg_match('/(?:Collection|LengthAwarePaginator|Paginator)<(?:[^,]+,\s*)?([^>]+)>/', $parentType, $m)) {
