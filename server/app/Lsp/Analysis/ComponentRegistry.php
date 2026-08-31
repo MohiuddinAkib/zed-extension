@@ -108,7 +108,10 @@ class ComponentRegistry
         // 3. Discover Livewire components in app/Livewire
         $this->discoverLivewireComponents();
 
-        // 4. Merge indexed Blade components from ProjectIndex
+        // 4. Discover Laravel's built-in Markdown mail components when the runtime index misses the mail view hint
+        $this->discoverMailMarkdownComponents();
+
+        // 5. Merge indexed Blade components from ProjectIndex
         $this->mergeProjectIndexComponents();
     }
 
@@ -314,6 +317,58 @@ class ComponentRegistry
 
             $this->components[$kebabName] = $symbol;
             $this->components['livewire:' . $kebabName] = $symbol;
+        }
+    }
+
+    protected function discoverMailMarkdownComponents(): void
+    {
+        $basePath = rtrim($this->project->path(), '/\\');
+        $candidates = [
+            $basePath . '/vendor/laravel/framework/src/Illuminate/Mail/resources/views/html',
+            $basePath . '/resources/views/vendor/mail/html',
+        ];
+
+        foreach ($candidates as $mailComponentsDir) {
+            if (!is_dir($mailComponentsDir)) {
+                continue;
+            }
+
+            $iterator = new \RecursiveIteratorIterator(
+                new \RecursiveDirectoryIterator($mailComponentsDir, \FilesystemIterator::SKIP_DOTS)
+            );
+
+            foreach ($iterator as $file) {
+                if (!$file->isFile() || !str_ends_with($file->getFilename(), '.blade.php')) {
+                    continue;
+                }
+
+                $relPath = ltrim(substr($file->getPathname(), strlen($mailComponentsDir)), '/\\');
+                $componentKey = 'mail::' . str_replace(['/', '\\'], '.', substr($relPath, 0, -10));
+                $componentKey = str_replace('.index', '', $componentKey);
+                $kebabKey = 'mail::' . str_replace('.', '-', substr($componentKey, strlen('mail::')));
+
+                $content = (string) file_get_contents($file->getPathname());
+                $props = $this->extractPropsFromBlade($content, $file->getPathname());
+                $slots = $this->extractSlotsFromBlade($content);
+
+                $symbol = new ComponentSymbol(
+                    name: $componentKey,
+                    tagName: 'x-' . $componentKey,
+                    isAnonymous: true,
+                    className: null,
+                    viewPath: $file->getPathname(),
+                    props: $props,
+                    slots: $slots,
+                    documentation: "Laravel mail component: <x-{$componentKey}>",
+                );
+
+                $this->components[$componentKey] = $symbol;
+                $this->components['x-' . $componentKey] = $symbol;
+                $this->components[$kebabKey] = $symbol;
+                $this->components['x-' . $kebabKey] = $symbol;
+            }
+
+            return;
         }
     }
 

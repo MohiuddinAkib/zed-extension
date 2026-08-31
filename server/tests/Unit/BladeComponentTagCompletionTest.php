@@ -196,3 +196,44 @@ test('protocol level TextDocumentCompletion handles partial Blade component tag 
     ]);
     expect($layoutItem['textEdit']['newText'])->toBe('x-layout');
 });
+
+test('blade component completion falls back to Laravel markdown mail components', function () {
+    $tempDir = sys_get_temp_dir() . '/mail_comp_fallback_' . uniqid();
+    mkdir($tempDir . '/vendor/laravel/framework/src/Illuminate/Mail/resources/views/html', 0777, true);
+    mkdir($tempDir . '/resources/views', 0777, true);
+
+    file_put_contents(
+        $tempDir . '/vendor/laravel/framework/src/Illuminate/Mail/resources/views/html/message.blade.php',
+        '<div>{{ $slot }}</div>',
+    );
+    file_put_contents(
+        $tempDir . '/vendor/laravel/framework/src/Illuminate/Mail/resources/views/html/button.blade.php',
+        "@props(['url', 'color' => 'primary'])\n<a href=\"{{ \$url }}\">{{ \$slot }}</a>",
+    );
+
+    $mockIndex = Mockery::mock(ProjectIndex::class);
+    $mockIndex->shouldReceive('bladeComponents')->andReturn([
+        'components' => [],
+        'prefixes' => ['x-'],
+    ]);
+    $mockIndex->shouldReceive('viewVariables')->andReturn(['views' => [], 'globals' => []]);
+    $mockIndex->shouldReceive('views')->andReturn(collect([]));
+    $mockIndex->shouldReceive('models')->andReturn([]);
+
+    $project = new Project(FileUri::of($tempDir), [], $mockIndex, new ScriptRunner($tempDir, ['php']));
+    $mapper = new BladeComponentDocumentMapper($project);
+
+    $mailDoc = new Document('file://' . $tempDir . '/resources/views/mail.blade.php', '<x-mail::');
+    $mailCompletions = $mapper->completions($mailDoc, ['line' => 0, 'character' => 9]);
+    $mailLabels = array_column($mailCompletions, 'label');
+
+    expect($mailLabels)->toContain('x-mail::message');
+    expect($mailLabels)->toContain('x-mail::button');
+
+    $buttonDoc = new Document('file://' . $tempDir . '/resources/views/mail.blade.php', '<x-mail::button ');
+    $buttonProps = $mapper->completions($buttonDoc, ['line' => 0, 'character' => strlen('<x-mail::button ')]);
+    $propLabels = array_column($buttonProps, 'label');
+
+    expect($propLabels)->toContain('url');
+    expect($propLabels)->toContain('color');
+});
