@@ -25,6 +25,7 @@ use App\Lsp\Features\BladeComponents\BladeComponentCompletionProvider;
 use App\Lsp\Features\BladeComponents\BladeComponentHoverProvider;
 use App\Lsp\Features\BladeComponents\BladeComponentLinkProvider;
 use App\Lsp\Features\BladeDirectives\BladeDirectiveCompletionProvider;
+use App\Lsp\Features\BladeDirectives\BladeDirectiveHoverProvider;
 use App\Lsp\Features\BladePhp\BladePhpHoverProvider;
 use App\Lsp\Features\BladePhp\BladePhpLinkProvider;
 use App\Lsp\Features\BladeVariables\BladeMemberCompletionProvider;
@@ -138,6 +139,7 @@ class FeatureRegistry
         ViewHoverProvider::class,
         BladeVariableHoverProvider::class,
         BladeMemberHoverProvider::class,
+        BladeDirectiveHoverProvider::class,
         BladePhpHoverProvider::class,
     ];
 

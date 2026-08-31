@@ -95,7 +95,15 @@ class BladeMemberCompletionProvider implements CompletionProvider
             return $this->getUseDirectiveCompletions($useMatch[1], $lineNumber, $character);
         }
 
-        // 2. Static / Facade member call: Js::, Str::, Auth::, Route::, DB::, AirFlight::, Status::
+        // 2. @inject('...' directive completions
+        if (str_contains($text, '@inject')) {
+            $injectCompletions = $this->getInjectDirectiveCompletions($document, $line, $text, $lineNumber, $character);
+            if (!empty($injectCompletions)) {
+                return $injectCompletions;
+            }
+        }
+
+        // 3. Static / Facade member call: Js::, Str::, Auth::, Route::, DB::, AirFlight::, Status::
         if (preg_match('/([a-zA-Z0-9_\\\\]+)::([a-zA-Z0-9_]*)$/', $text, $staticMatch)) {
             return $this->getStaticMemberCompletions($document, $staticMatch[1], $staticMatch[2], $lineNumber, $character);
         }
@@ -1035,53 +1043,229 @@ class BladeMemberCompletionProvider implements CompletionProvider
     public function getUseDirectiveCompletions(string $prefix, int $lineNumber, int $character): array
     {
         $completions = [];
-        $lowPrefix = strtolower($prefix);
+        $registry = new \App\Lsp\Features\ClassIndex\ClassRegistry($this->project);
+        $matches = $registry->search($prefix, limit: 100);
 
         $range = [
             'start' => ['line' => $lineNumber, 'character' => $character - strlen($prefix)],
             'end' => ['line' => $lineNumber, 'character' => $character],
         ];
 
-        // 1. Eloquent Models
-        try {
-            $models = $this->project->index->models();
-            foreach ($models as $m) {
-                $class = is_array($m) ? ($m['class'] ?? ($m['name'] ?? '')) : (string) $m;
-                if ($class === '') continue;
-                $cleanClass = ltrim($class, '\\');
-                if ($lowPrefix !== '' && !str_starts_with(strtolower($cleanClass), $lowPrefix) && !str_starts_with(strtolower(class_basename($cleanClass)), $lowPrefix)) {
-                    continue;
-                }
-                $completions[] = [
-                    'label' => $cleanClass,
-                    'kind' => 7, // Class
-                    'detail' => 'Eloquent Model',
-                    'textEdit' => [
-                        'range' => $range,
-                        'newText' => $cleanClass,
-                    ],
-                ];
-            }
-        } catch (\Throwable) {}
+        foreach ($matches as $item) {
+            $class = $item['class'];
+            $kindStr = $item['kind'] ?? 'Class';
+            $kind = match ($kindStr) {
+                'Interface' => 8,
+                'Enum' => 13,
+                'Trait' => 14,
+                default => 7,
+            };
 
-        // 2. Global Facades and helpers
-        foreach (\App\Lsp\Features\Facades\FacadeMap::all() as $alias => $fqcn) {
-            $cleanFqcn = ltrim($fqcn, '\\');
-            if ($lowPrefix !== '' && !str_starts_with(strtolower($cleanFqcn), $lowPrefix) && !str_starts_with(strtolower($alias), $lowPrefix)) {
-                continue;
-            }
             $completions[] = [
-                'label' => $cleanFqcn,
-                'kind' => 7, // Class
-                'detail' => \App\Lsp\Features\Facades\FacadeMap::description($alias),
+                'label' => $class,
+                'labelDetails' => [
+                    'detail' => ' (' . $item['name'] . ')',
+                    'description' => $kindStr,
+                ],
+                'kind' => $kind,
+                'detail' => $item['detail'] ?? $class,
+                'documentation' => [
+                    'kind' => 'markdown',
+                    'value' => "### `{$class}`\n\n*Type:* `{$kindStr}`" . (!empty($item['path']) ? "\n*Path:* `{$item['path']}`" : '') . "\n\n```blade\n@use('{$class}')\n```\n\nImports `{$class}` into the Blade template scope.",
+                ],
                 'textEdit' => [
                     'range' => $range,
-                    'newText' => $cleanFqcn,
+                    'newText' => $class,
                 ],
             ];
         }
 
         return $completions;
+    }
+
+    public function getInjectDirectiveCompletions(Document $document, string $line, string $text, int $lineNumber, int $character): array
+    {
+        // 1. Second argument: service / container binding / class string
+        // E.g. @inject('metrics', '|' or @inject('metrics', 'App\Services\
+        if (preg_match('/@inject\s*\(\s*[\'"][a-zA-Z0-9_]*[\'"]\s*,\s*[\'"]?([a-zA-Z0-9_.\/\\\\-]*)$/', $text, $m)) {
+            $prefix = $m[1];
+            $lowPrefix = strtolower($prefix);
+            $range = [
+                'start' => ['line' => $lineNumber, 'character' => $character - strlen($prefix)],
+                'end' => ['line' => $lineNumber, 'character' => $character],
+            ];
+
+            $completions = [];
+            $seen = [];
+
+            // A. Core & Default Container Bindings
+            foreach (AppBindingContainerTypeMap::all() as $bindingKey => $boundClass) {
+                if ($lowPrefix !== '' && !str_starts_with(strtolower($bindingKey), $lowPrefix) && !str_starts_with(strtolower(class_basename($boundClass)), $lowPrefix)) {
+                    continue;
+                }
+                $seen[$bindingKey] = true;
+                $completions[] = [
+                    'label' => $bindingKey,
+                    'labelDetails' => [
+                        'detail' => ' -> ' . class_basename($boundClass),
+                        'description' => 'Container Binding',
+                    ],
+                    'kind' => 18, // Service
+                    'detail' => "Container Binding: {$bindingKey} ({$boundClass})",
+                    'documentation' => [
+                        'kind' => 'markdown',
+                        'value' => "### Container Binding `'{$bindingKey}'`\n\n*Resolved Type:* `{$boundClass}`\n\nResolves instance of `{$boundClass}` from Laravel Service Container.",
+                    ],
+                    'textEdit' => [
+                        'range' => $range,
+                        'newText' => $bindingKey,
+                    ],
+                ];
+            }
+
+            // B. Custom Project Container Bindings from ProjectIndex
+            try {
+                $bindings = $this->project->index->appBindings();
+                foreach ($bindings as $key => $bindingData) {
+                    $keyStr = (string) $key;
+                    if (isset($seen[$keyStr])) continue;
+                    if ($lowPrefix !== '' && !str_starts_with(strtolower($keyStr), $lowPrefix)) {
+                        continue;
+                    }
+                    $seen[$keyStr] = true;
+                    $class = is_array($bindingData) ? ($bindingData['class'] ?? '') : '';
+                    $completions[] = [
+                        'label' => $keyStr,
+                        'labelDetails' => [
+                            'detail' => $class ? ' -> ' . class_basename($class) : '',
+                            'description' => 'App Binding',
+                        ],
+                        'kind' => 18, // Service
+                        'detail' => "App Binding: {$keyStr}" . ($class ? " ({$class})" : ''),
+                        'documentation' => [
+                            'kind' => 'markdown',
+                            'value' => "### Custom Container Binding `'{$keyStr}'`\n\n*Class:* `{$class}`",
+                        ],
+                        'textEdit' => [
+                            'range' => $range,
+                            'newText' => $keyStr,
+                        ],
+                    ];
+                }
+            } catch (\Throwable) {}
+
+            // C. All Project & Vendor Classes, Contracts, and Services from ClassRegistry
+            $registry = new \App\Lsp\Features\ClassIndex\ClassRegistry($this->project);
+            $classes = $registry->search($prefix, limit: 100);
+            foreach ($classes as $item) {
+                $class = $item['class'];
+                if (isset($seen[$class])) continue;
+                $seen[$class] = true;
+
+                $kindStr = $item['kind'] ?? 'Class';
+                $kind = match ($kindStr) {
+                    'Interface' => 8,
+                    'Enum' => 13,
+                    'Trait' => 14,
+                    'Service', 'Factory' => 18,
+                    default => 7,
+                };
+
+                $completions[] = [
+                    'label' => $class,
+                    'labelDetails' => [
+                        'detail' => ' (' . $item['name'] . ')',
+                        'description' => $kindStr,
+                    ],
+                    'kind' => $kind,
+                    'detail' => $item['detail'] ?? $class,
+                    'documentation' => [
+                        'kind' => 'markdown',
+                        'value' => "### `{$class}`\n\n*Type:* `{$kindStr}`" . (!empty($item['path']) ? "\n*Path:* `{$item['path']}`" : '') . "\n\nInjects `{$class}` via container auto-wiring.",
+                    ],
+                    'textEdit' => [
+                        'range' => $range,
+                        'newText' => $class,
+                    ],
+                ];
+            }
+
+            return $completions;
+        }
+
+        // 2. First argument: variable name
+        // E.g. @inject('|' or @inject('met|
+        if (preg_match('/@inject\s*\(\s*[\'"]?([a-zA-Z0-9_]*)$/', $text, $m)) {
+            $prefix = $m[1];
+            $lowPrefix = strtolower($prefix);
+            $range = [
+                'start' => ['line' => $lineNumber, 'character' => $character - strlen($prefix)],
+                'end' => ['line' => $lineNumber, 'character' => $character],
+            ];
+
+            // If 2nd argument already exists on the line, infer variable name from service
+            $suggestions = [];
+            if (preg_match('/@inject\s*\(\s*[\'"][^\'"]*[\'"]\s*,\s*[\'"]([^\'"]+)[\'"]/', $line, $sMatch)) {
+                $service = $sMatch[1];
+                $base = class_basename($service);
+                $camel = lcfirst($base);
+                $suggestions[] = [
+                    'name' => $camel,
+                    'detail' => "Inferred from '{$service}'",
+                ];
+                if (str_ends_with($camel, 'Service')) {
+                    $short = substr($camel, 0, -7);
+                    if ($short !== '') {
+                        $suggestions[] = [
+                            'name' => $short,
+                            'detail' => "Short variable name",
+                        ];
+                    }
+                }
+            }
+
+            // Common container variable suggestions
+            $commonVars = [
+                'metrics' => 'Metrics service',
+                'db' => 'Database manager',
+                'auth' => 'Auth manager',
+                'cache' => 'Cache repository',
+                'service' => 'General service',
+                'paymentGateway' => 'Payment Gateway',
+                'userService' => 'User service',
+            ];
+            foreach ($commonVars as $vName => $vDetail) {
+                $suggestions[] = ['name' => $vName, 'detail' => $vDetail];
+            }
+
+            $completions = [];
+            $seen = [];
+            foreach ($suggestions as $s) {
+                $var = $s['name'];
+                if (isset($seen[$var])) continue;
+                if ($lowPrefix !== '' && !str_starts_with(strtolower($var), $lowPrefix)) {
+                    continue;
+                }
+                $seen[$var] = true;
+
+                $completions[] = [
+                    'label' => $var,
+                    'labelDetails' => [
+                        'description' => 'Variable Name',
+                    ],
+                    'kind' => 6, // Variable
+                    'detail' => $s['detail'],
+                    'textEdit' => [
+                        'range' => $range,
+                        'newText' => $var,
+                    ],
+                ];
+            }
+
+            return $completions;
+        }
+
+        return [];
     }
 
     public function getExpressionClassCompletions(Document $document, string $text, int $lineNumber, int $character): array

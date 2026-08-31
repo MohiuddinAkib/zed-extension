@@ -147,6 +147,30 @@ class BladeAstAnalyzer
             }
         }
 
+        // Resilient fallback for @inject during active editing
+        if (preg_match_all('/@inject\s*\(\s*[\'"]([a-zA-Z0-9_]+)[\'"]\s*,\s*([\'"]([^\'"]+)[\'"]|[a-zA-Z0-9_\\\\]+::class)\s*\)/', $content, $injectMatches, PREG_OFFSET_CAPTURE | PREG_SET_ORDER)) {
+            foreach ($injectMatches as $m) {
+                $name = $m[1][0];
+                if (!isset($symbols[$name])) {
+                    $rawService = $m[2][0];
+                    $serviceKey = str_ends_with($rawService, '::class')
+                        ? substr($rawService, 0, -7)
+                        : trim($rawService, '\'"');
+                    $resolved = \App\Lsp\Features\AppBindings\AppBindingContainerTypeMap::resolveType($serviceKey);
+                    $type = $resolved ?? ('\\' . ltrim($serviceKey, '\\'));
+                    $offset = $m[0][1];
+                    $line = substr_count(substr($content, 0, $offset), "\n") + 1;
+                    $symbols[$name] = new VariableSymbol(
+                        name: $name,
+                        type: TypeRef::fromString($type),
+                        origin: new ScopeOrigin('@inject', $source, $line, "Injected Service: {$type}"),
+                        detail: "Injected Service: {$type}",
+                        range: SourceRange::line($line),
+                    );
+                }
+            }
+        }
+
         return $symbols;
     }
 
@@ -372,12 +396,23 @@ class BladeAstAnalyzer
         $varArg = $args[0]->value ?? null;
         $classArg = $args[1]->value ?? null;
 
-        if (!$varArg instanceof String_ || !$classArg instanceof String_) {
+        if (!$varArg instanceof String_) {
             return null;
         }
 
         $name = $varArg->value;
-        $type = '\\' . ltrim($classArg->value, '\\');
+        $rawType = '';
+
+        if ($classArg instanceof String_) {
+            $rawType = $classArg->value;
+        } elseif ($classArg instanceof ClassConstFetch && $classArg->class instanceof Name) {
+            $rawType = $classArg->class->toString();
+        } else {
+            return null;
+        }
+
+        $resolved = \App\Lsp\Features\AppBindings\AppBindingContainerTypeMap::resolveType($rawType);
+        $type = $resolved ?? ('\\' . ltrim($rawType, '\\'));
 
         return new VariableSymbol(
             name: $name,

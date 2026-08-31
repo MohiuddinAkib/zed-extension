@@ -266,6 +266,11 @@ class BladeDirectiveSignatureProvider
                 ['name' => 'as', 'type' => TypeRef::fromString('string'), 'optional' => true, 'documentation' => 'Class alias name.'],
             ], 'Import PHP class or alias in Blade template.'),
 
+            'inject' => new DirectiveSignature('inject', [
+                ['name' => 'variable', 'type' => TypeRef::fromString('string'), 'documentation' => 'The local variable name to assign the service to in template scope.'],
+                ['name' => 'service', 'type' => TypeRef::fromString('string|class-string'), 'documentation' => 'Container service binding key or fully qualified class name to inject from container.'],
+            ], 'Inject a service or dependency from the Laravel service container.'),
+
             'json' => new DirectiveSignature('json', [
                 ['name' => 'data', 'type' => TypeRef::fromString('mixed'), 'documentation' => 'Data to encode as JSON.'],
                 ['name' => 'options', 'type' => TypeRef::fromString('int'), 'optional' => true, 'documentation' => 'JSON encoding options.'],
