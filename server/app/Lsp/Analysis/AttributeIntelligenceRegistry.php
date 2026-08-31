@@ -282,8 +282,43 @@ class AttributeIntelligenceRegistry
                 ? ($this->semanticIndex->containerBindingType($cleanVal) ?? 'mixed')
                 : 'mixed',
             'tag' => 'array',
-            'config_key' => 'mixed',
+            'config_key' => $cleanVal !== null ? $this->resolveConfigValueType($cleanVal) : 'mixed',
             default => null,
+        };
+    }
+
+    protected function resolveConfigValueType(string $key): string
+    {
+        if ($this->project === null) {
+            return 'mixed';
+        }
+
+        try {
+            $configs = $this->project->index->configs()['configs'] ?? collect([]);
+            foreach ($configs as $config) {
+                if ((string) ($config['name'] ?? '') !== $key) {
+                    continue;
+                }
+
+                return $this->valueType($config['value'] ?? null);
+            }
+        } catch (\Throwable) {
+        }
+
+        return 'mixed';
+    }
+
+    protected function valueType(mixed $value): string
+    {
+        return match (true) {
+            is_string($value) => class_exists($value) || interface_exists($value) ? '\\' . ltrim($value, '\\') : 'string',
+            is_int($value) => 'int',
+            is_float($value) => 'float',
+            is_bool($value) => 'bool',
+            is_array($value) => 'array',
+            is_object($value) => '\\' . ltrim($value::class, '\\'),
+            $value === null => 'null',
+            default => 'mixed',
         };
     }
 

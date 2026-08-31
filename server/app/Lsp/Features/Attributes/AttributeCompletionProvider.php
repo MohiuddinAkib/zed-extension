@@ -9,6 +9,7 @@ use App\Lsp\Analysis\DriverRegistry;
 use App\Lsp\Analysis\SemanticIndex;
 use App\Lsp\Contracts\CompletionProvider;
 use App\Lsp\Document;
+use App\Lsp\Features\ClassIndex\ClassRegistry;
 use App\Lsp\Project;
 use App\Lsp\Support\Position;
 use App\Lsp\Support\Utf16Position;
@@ -18,6 +19,7 @@ class AttributeCompletionProvider implements CompletionProvider
     protected AttributeIntelligenceRegistry $attrRegistry;
     protected DriverRegistry $driverRegistry;
     protected ?SemanticIndex $semanticIndex = null;
+    protected ClassRegistry $classRegistry;
 
     public function __construct(
         protected Project $project,
@@ -26,6 +28,7 @@ class AttributeCompletionProvider implements CompletionProvider
         $this->attrRegistry = $attrRegistry ?? new AttributeIntelligenceRegistry($project);
         $this->driverRegistry = $this->attrRegistry->driverRegistry();
         $this->semanticIndex = new SemanticIndex($project);
+        $this->classRegistry = new ClassRegistry($project);
     }
 
     public function get(Document $document, array $position): array
@@ -368,14 +371,96 @@ class AttributeCompletionProvider implements CompletionProvider
                 if ($prefix !== '' && stripos($key, $prefix) === false) {
                     continue;
                 }
+                $detail = is_array($type) ? (string) ($type['class'] ?? '') : (string) $type;
                 $items[] = [
                     'label'      => $key,
                     'kind'       => 12,
-                    'detail'     => $type,
+                    'detail'     => $detail,
                     'insertText' => $key,
                     'textEdit'   => [
                         'range'   => $replacementRange,
                         'newText' => $key,
+                    ],
+                ];
+            }
+
+            return $items;
+        }
+
+        if ($domain === 'models' && $this->semanticIndex !== null) {
+            $items = [];
+            foreach ($this->semanticIndex->models() as $key => $model) {
+                $class = is_array($model) ? (string) ($model['class'] ?? $key) : (string) $model;
+                if ($class === '' || ($prefix !== '' && stripos($class, $prefix) === false && stripos(class_basename($class), $prefix) === false)) {
+                    continue;
+                }
+                $items[] = [
+                    'label'      => '\\' . ltrim($class, '\\'),
+                    'kind'       => 7,
+                    'detail'     => 'Eloquent Model',
+                    'insertText' => '\\' . ltrim($class, '\\') . '::class',
+                    'textEdit'   => [
+                        'range'   => $replacementRange,
+                        'newText' => '\\' . ltrim($class, '\\') . '::class',
+                    ],
+                ];
+            }
+
+            return $items;
+        }
+
+        if ($domain === 'model_attributes' && $this->semanticIndex !== null) {
+            $attributes = [];
+            foreach ($this->semanticIndex->models() as $model) {
+                if (!is_array($model)) {
+                    continue;
+                }
+                foreach ($model['attributes'] ?? [] as $attr) {
+                    $name = (string) ($attr['name'] ?? '');
+                    if ($name !== '') {
+                        $attributes[$name] = (string) ($attr['cast'] ?? $attr['type'] ?? 'mixed');
+                    }
+                }
+            }
+            $attributes['id'] ??= 'int|string';
+
+            $items = [];
+            foreach ($attributes as $name => $type) {
+                if ($prefix !== '' && stripos($name, $prefix) === false) {
+                    continue;
+                }
+                $items[] = [
+                    'label'      => $name,
+                    'kind'       => 10,
+                    'detail'     => $type,
+                    'insertText' => $name,
+                    'textEdit'   => [
+                        'range'   => $replacementRange,
+                        'newText' => $name,
+                    ],
+                ];
+            }
+
+            return $items;
+        }
+
+        if (in_array($domain, ['scopes', 'observers'], true)) {
+            $items = [];
+            $suffix = $domain === 'scopes' ? 'Scope' : 'Observer';
+            foreach ($this->classRegistry->search($prefix, 100) as $class) {
+                $fqcn = (string) ($class['class'] ?? '');
+                $base = class_basename($fqcn);
+                if ($fqcn === '' || !str_ends_with($base, $suffix)) {
+                    continue;
+                }
+                $items[] = [
+                    'label'      => '\\' . ltrim($fqcn, '\\'),
+                    'kind'       => 7,
+                    'detail'     => (string) ($class['detail'] ?? $suffix),
+                    'insertText' => '\\' . ltrim($fqcn, '\\') . '::class',
+                    'textEdit'   => [
+                        'range'   => $replacementRange,
+                        'newText' => '\\' . ltrim($fqcn, '\\') . '::class',
                     ],
                 ];
             }

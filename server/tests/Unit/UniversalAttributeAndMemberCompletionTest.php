@@ -41,8 +41,8 @@ function createUniversalAttributeTestProject(string $tempDir): Project
             ['name' => 'mail.mailers.smtp', 'file' => $tempDir . '/config/mail.php', 'line' => 10],
             ['name' => 'mail.mailers.ses', 'file' => $tempDir . '/config/mail.php', 'line' => 15],
             ['name' => 'mail.mailers.postmark', 'file' => $tempDir . '/config/mail.php', 'line' => 20],
-            ['name' => 'app.name', 'file' => $tempDir . '/config/app.php', 'line' => 5],
-            ['name' => 'app.env', 'file' => $tempDir . '/config/app.php', 'line' => 6],
+            ['name' => 'app.name', 'value' => 'Laravel', 'file' => $tempDir . '/config/app.php', 'line' => 5],
+            ['name' => 'app.env', 'value' => 'local', 'file' => $tempDir . '/config/app.php', 'line' => 6],
         ]),
         'paths' => collect([]),
     ]);
@@ -164,6 +164,7 @@ test('AttributeIntelligenceRegistry defines supported attributes, arguments, dom
 
     // Config attribute
     expect($registry->getAttributeArgumentDomain('Config', 0))->toBe('config_keys');
+    expect($registry->resolveInjectedType('Config', 'app.name'))->toBe('string');
 
     // Middleware attribute
     expect($registry->getAttributeArgumentDomain('Middleware', 0))->toBe('middleware');
@@ -219,6 +220,24 @@ test('AttributeCompletionProvider completes driver, config, route, view, and mid
     $items5 = $provider->get($doc5, ['line' => 0, 'character' => $char5]);
     $labels5 = array_column($items5, 'label');
     expect($labels5)->toContain('app.name', 'app.env');
+});
+
+test('AttributeCompletionProvider covers model and model attribute domains', function () {
+    $tempDir = sys_get_temp_dir() . '/attr_domain_test_' . uniqid();
+    $project = createUniversalAttributeTestProject($tempDir);
+    $provider = new AttributeCompletionProvider($project);
+
+    $code1 = "<?php #[UseEloquentModel('Ticket')] class UsesModel {}";
+    $doc1 = new Document('file://' . $tempDir . '/app/UsesModel.php', $code1);
+    $char1 = strrpos($code1, "'Ticket") + strlen("'Ticket");
+    $modelLabels = array_column($provider->get($doc1, ['line' => 0, 'character' => $char1]), 'label');
+    expect($modelLabels)->toContain('\\App\\Models\\Ticket');
+
+    $code2 = "<?php #[Fillable('su')] class Ticket {}";
+    $doc2 = new Document('file://' . $tempDir . '/app/Models/Ticket.php', $code2);
+    $char2 = strrpos($code2, "'su") + strlen("'su");
+    $attributeLabels = array_column($provider->get($doc2, ['line' => 0, 'character' => $char2]), 'label');
+    expect($attributeLabels)->toContain('subject');
 });
 
 test('Helper and facade driver completion suggests configured drivers', function () {
@@ -369,6 +388,40 @@ PHP;
 
     @rmdir($tempDir . '/resources/views');
     @rmdir($tempDir);
+});
+
+test('Blade member completion suggests conventional Eloquent id when model index omits it', function () {
+    $tempDir = sys_get_temp_dir() . '/livewire_id_fallback_' . uniqid();
+    @mkdir($tempDir . '/resources/views/livewire', 0777, true);
+
+    $mockIndex = Mockery::mock(ProjectIndex::class);
+    $mockIndex->shouldReceive('configs')->andReturn(['configs' => collect([]), 'paths' => collect([])]);
+    $mockIndex->shouldReceive('viewVariables')->andReturn(['views' => [], 'globals' => []]);
+    $mockIndex->shouldReceive('views')->andReturn(collect([]));
+    $mockIndex->shouldReceive('models')->andReturn([
+        'App\Models\Ticket' => [
+            'class' => 'App\Models\Ticket',
+            'attributes' => [
+                ['name' => 'subject', 'type' => 'string'],
+                ['name' => 'status', 'type' => 'string'],
+            ],
+            'relations' => [],
+        ],
+    ]);
+    $mockIndex->shouldReceive('bladeComponents')->andReturn(['components' => [], 'prefixes' => ['x-']]);
+
+    $project = new Project(FileUri::of($tempDir), [], $mockIndex, new ScriptRunner($tempDir, ['php']));
+    $provider = new BladeMemberCompletionProvider($project);
+
+    $code = "/** @var \\App\\Models\\Ticket \$ticket */\n<div>{{ \$ticket->i }}</div>";
+    $doc = new Document('file://' . $tempDir . '/resources/views/livewire/support-ticket-chat-stream.blade.php', $code);
+    $lines = explode("\n", $code);
+    $char = strrpos($lines[1], '->i') + 3;
+    $items = $provider->get($doc, ['line' => 1, 'character' => $char]);
+    $idItem = collect($items)->firstWhere('label', 'id');
+
+    expect($idItem)->not->toBeNull();
+    expect($idItem['labelDetails']['description'] ?? $idItem['detail'] ?? '')->toContain('int|string');
 });
 
 test('protocol level TextDocumentCompletion handles simultaneous syntax diagnostics and completion results', function () {

@@ -8,6 +8,7 @@ use App\Lsp\Document;
 use App\Lsp\Features\AppBindings\AppBindingContainerTypeMap;
 use App\Lsp\Features\Functions\GlobalFunctionRegistry;
 use App\Lsp\Project;
+use App\Lsp\Semantics\VirtualDocument;
 use Illuminate\Container\Container;
 use ReflectionFunction;
 use ReflectionNamedType;
@@ -21,6 +22,8 @@ class FunctionTypeResolver
     protected DocBlockParser $docBlockParser;
 
     protected ?SemanticIndex $semanticIndex = null;
+
+    protected DriverRegistry $driverRegistry;
 
     /**
      * @var array<string, string|null>
@@ -61,11 +64,11 @@ class FunctionTypeResolver
      *
      * @param  string  $functionName Name of function (e.g. 'app', 'config', 'auth')
      * @param  string|null  $firstArg First argument literal (e.g. "'db'", "User::class")
-     * @param  Document|null  $document Optional document context
+     * @param  Document|VirtualDocument|null  $document Optional document context
      * @param  int|null  $argumentCount Number of arguments passed to function (e.g. 0 for config(), 1 for config('key'))
      * @return string|null Resolved return type string or null
      */
-    public function resolve(string $functionName, ?string $firstArg = null, ?Document $document = null, ?int $argumentCount = null): ?string
+    public function resolve(string $functionName, ?string $firstArg = null, Document|VirtualDocument|null $document = null, ?int $argumentCount = null): ?string
     {
         $clean = ltrim(strtolower($functionName), '\\');
         $cacheKey = $clean . '|' . ($firstArg ?? '') . '|' . ($argumentCount ?? '');
@@ -206,6 +209,142 @@ class FunctionTypeResolver
         }
 
         return $this->cache[$cacheKey] = null;
+    }
+
+    /**
+     * Resolve a helper call with all argument expressions available.
+     *
+     * @param  list<string>  $arguments
+     * @param  array<string, mixed>|null  $position
+     */
+    public function resolveCall(string $functionName, array $arguments, Document|VirtualDocument|null $document = null, ?array $position = null): ?string
+    {
+        $clean = ltrim(strtolower($functionName), '\\');
+        $firstArg = $arguments[0] ?? null;
+        $argumentCount = count($arguments);
+
+        if ($clean === 'data_get' && isset($arguments[0], $arguments[1]) && $document !== null) {
+            $resolver = new DataPathResolver($this->project, functionTypeResolver: $this);
+            $type = $resolver->inferPathValueType(
+                $arguments[0],
+                $arguments[1],
+                $this->toConcreteDocument($document),
+                $position,
+                $arguments[2] ?? null,
+            );
+
+            if ($type !== null && (string) $type !== 'mixed') {
+                return $type->displayName;
+            }
+        }
+
+        if (in_array($clean, ['data_set', 'data_fill'], true) && isset($arguments[0]) && $document !== null) {
+            $resolver = new DataPathResolver($this->project, functionTypeResolver: $this);
+            $type = $resolver->inferExpressionType($arguments[0], $this->toConcreteDocument($document), $position);
+
+            if ($type !== null && (string) $type !== 'mixed') {
+                return $type->displayName;
+            }
+        }
+
+        if ($clean === 'fluent') {
+            if (isset($arguments[0]) && $document !== null) {
+                $resolver = new DataPathResolver($this->project, functionTypeResolver: $this);
+                $inner = $resolver->inferExpressionType($arguments[0], $this->toConcreteDocument($document), $position);
+
+                if ($inner !== null && (string) $inner !== 'mixed') {
+                    return "\\Illuminate\\Support\\Fluent<{$inner->displayName}>";
+                }
+            }
+
+            return '\Illuminate\Support\Fluent';
+        }
+
+        return $this->resolve($functionName, $this->literalArgumentValue($firstArg), $document, $argumentCount);
+    }
+
+    /**
+     * Split a comma-separated argument list while respecting nested structures.
+     *
+     * @return list<string>
+     */
+    public function splitArguments(string $arguments): array
+    {
+        $parts = [];
+        $buffer = '';
+        $depth = 0;
+        $quote = null;
+        $length = strlen($arguments);
+
+        for ($i = 0; $i < $length; $i++) {
+            $char = $arguments[$i];
+
+            if ($quote !== null) {
+                $buffer .= $char;
+                if ($char === $quote && ($i === 0 || $arguments[$i - 1] !== '\\')) {
+                    $quote = null;
+                }
+                continue;
+            }
+
+            if ($char === "'" || $char === '"') {
+                $quote = $char;
+                $buffer .= $char;
+                continue;
+            }
+
+            if ($char === '(' || $char === '[' || $char === '{') {
+                $depth++;
+            } elseif ($char === ')' || $char === ']' || $char === '}') {
+                $depth = max(0, $depth - 1);
+            }
+
+            if ($char === ',' && $depth === 0) {
+                $part = trim($buffer);
+                if ($part !== '') {
+                    $parts[] = $part;
+                }
+                $buffer = '';
+                continue;
+            }
+
+            $buffer .= $char;
+        }
+
+        $tail = trim($buffer);
+        if ($tail !== '') {
+            $parts[] = $tail;
+        }
+
+        return $parts;
+    }
+
+    protected function literalArgumentValue(?string $argument): ?string
+    {
+        if ($argument === null) {
+            return null;
+        }
+
+        $argument = trim($argument);
+        if ($argument === '') {
+            return null;
+        }
+
+        if ((str_starts_with($argument, "'") && str_ends_with($argument, "'"))
+            || (str_starts_with($argument, '"') && str_ends_with($argument, '"'))) {
+            return substr($argument, 1, -1);
+        }
+
+        return $argument;
+    }
+
+    protected function toConcreteDocument(Document|VirtualDocument $document): Document
+    {
+        if ($document instanceof Document) {
+            return $document;
+        }
+
+        return new Document($document->virtualUri(), $document->phpCode);
     }
 
     /**

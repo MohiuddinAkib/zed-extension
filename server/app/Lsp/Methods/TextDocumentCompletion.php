@@ -8,6 +8,8 @@ use App\Lsp\Contracts\Method;
 use App\Lsp\DocumentManager;
 use App\Lsp\FeatureRegistry;
 use App\Lsp\Project;
+use App\Lsp\Semantics\SourceMap;
+use App\Lsp\Semantics\VirtualDocument;
 use App\Lsp\Support\CompletionItems;
 use App\Lsp\Transport\JsonRpcRequest;
 use App\Lsp\Transport\JsonRpcResponse;
@@ -80,6 +82,24 @@ class TextDocumentCompletion implements Method
                             $seenKeys[$key] = true;
                             $aggregatedItems[] = $phpItem;
                         }
+                    }
+                }
+            } catch (\Throwable) {}
+        } elseif (str_ends_with($document->uri, '.php')) {
+            try {
+                $virtualDoc = new VirtualDocument(
+                    $document->uri,
+                    $document->content,
+                    new SourceMap($document->content, $document->content),
+                );
+                $phpItems = $this->features->phpIntelligence()->completion($virtualDoc, $position);
+                foreach ($phpItems as $phpItem) {
+                    $label = is_array($phpItem) ? ($phpItem['label'] ?? '') : (string) $phpItem;
+                    $insertText = is_array($phpItem) ? ($phpItem['insertText'] ?? $label) : $label;
+                    $key = $label . '|' . $insertText;
+                    if (!isset($seenKeys[$key])) {
+                        $seenKeys[$key] = true;
+                        $aggregatedItems[] = $phpItem;
                     }
                 }
             } catch (\Throwable) {}

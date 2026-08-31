@@ -221,14 +221,8 @@ class BladeMemberCompletionProvider implements CompletionProvider
             $chain = $matches[3];
             $memberPrefix = $matches[4];
 
-            if ($funcName === 'fluent' && trim($rawArgs) !== '') {
-                $dataPathResolver = new \App\Lsp\Analysis\DataPathResolver($this->project);
-                $innerTypeRef = $dataPathResolver->inferExpressionType($rawArgs, $document, $position);
-                $rootType = $innerTypeRef !== null ? "\\Illuminate\\Support\\Fluent<{$innerTypeRef->displayName}>" : '\\Illuminate\\Support\\Fluent';
-            } else {
-                $argCount = trim($rawArgs) === '' ? 0 : 1;
-                $rootType = $this->functionTypeResolver->resolve($funcName, $rawArgs, $document, $argCount);
-            }
+            $args = $this->functionTypeResolver->splitArguments($rawArgs);
+            $rootType = $this->functionTypeResolver->resolveCall($funcName, $args, $document, $position);
 
             if ($rootType) {
                 $targetType = $this->resolveChainedType($rootType, $chain);
@@ -469,9 +463,10 @@ class BladeMemberCompletionProvider implements CompletionProvider
         if ($baseClass === 'Illuminate\Support\Fluent' || $baseClass === 'Fluent') {
             if (preg_match('/(?:Illuminate\\\\Support\\\\)?Fluent<(.+)>$/', $cleanType, $fluentShapeMatch)) {
                 $innerShapeStr = $fluentShapeMatch[1];
-                $innerShapeKeys = $this->docBlockParser->extractArrayShapeKeys($innerShapeStr);
-                foreach ($innerShapeKeys as $propName => $info) {
-                    $propType = $info['type'];
+                $dataPathResolver = new \App\Lsp\Analysis\DataPathResolver($this->project);
+                $innerKeys = $dataPathResolver->resolveKeysForType(\App\Lsp\Semantics\TypeRef::fromString($innerShapeStr));
+                foreach ($innerKeys as $propName => $info) {
+                    $propType = $info['type']->displayName;
                     $members[$propName] = [
                         'name'          => $propName,
                         'kind'          => 10, // Property
@@ -534,6 +529,15 @@ class BladeMemberCompletionProvider implements CompletionProvider
                         'documentation' => "**Eloquent Attribute**\n\n*Type:* `{$attrType}`",
                     ];
                 }
+            }
+
+            if (!isset($members['id'])) {
+                $members['id'] = [
+                    'name'          => 'id',
+                    'kind'          => 10,
+                    'detail'        => 'int|string',
+                    'documentation' => '**Eloquent Primary Key**' . "\n\n" . '*Type:* `int|string`',
+                ];
             }
 
             foreach ($modelData['relations'] ?? [] as $rel) {
@@ -843,6 +847,19 @@ class BladeMemberCompletionProvider implements CompletionProvider
 
                 // If currentType is Fluent
                 if (str_contains($currentType, 'Fluent')) {
+                    $dataPathResolver = new \App\Lsp\Analysis\DataPathResolver($this->project);
+                    $fluentReturn = $dataPathResolver->inferFluentMethodReturnType(
+                        \App\Lsp\Semantics\TypeRef::fromString($currentType),
+                        $member,
+                        $this->functionTypeResolver->splitArguments($args),
+                        new Document('memory://fluent-chain.php', ''),
+                    );
+
+                    if ((string) $fluentReturn !== 'mixed') {
+                        $currentType = $fluentReturn->displayName;
+                        continue;
+                    }
+
                     if ($member === 'string') {
                         $currentType = '\\Illuminate\\Support\\Stringable';
                         continue;
@@ -881,9 +898,9 @@ class BladeMemberCompletionProvider implements CompletionProvider
 
                     // Check if $member is a dynamic property on the inner shape
                     if (preg_match('/(?:Illuminate\\\\Support\\\\)?Fluent<(.+)>$/', $currentType, $flM)) {
-                        $innerShapeKeys = $this->docBlockParser->extractArrayShapeKeys($flM[1]);
-                        if (isset($innerShapeKeys[$member])) {
-                            $currentType = $innerShapeKeys[$member]['type'];
+                        $innerKeys = $dataPathResolver->resolveKeysForType(\App\Lsp\Semantics\TypeRef::fromString($flM[1]));
+                        if (isset($innerKeys[$member])) {
+                            $currentType = $innerKeys[$member]['type']->displayName;
                             continue;
                         }
                     }

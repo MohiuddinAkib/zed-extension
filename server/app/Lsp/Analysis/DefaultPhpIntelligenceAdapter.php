@@ -208,27 +208,21 @@ class DefaultPhpIntelligenceAdapter implements PhpIntelligenceAdapter
             if (preg_match('/@var\s+([^\s]+)\s+\$' . preg_quote($varName, '/') . '/', $document->phpCode, $docM)) {
                 return $docM[1];
             }
+            if ($attrType = $this->resolveAttributeDecoratedVariableType($varName, $document->phpCode)) {
+                return $attrType;
+            }
 
             return null;
         }
 
         if ($node instanceof Node\Expr\FuncCall && $node->name instanceof Node\Name) {
             $fnName = $node->name->toString();
-            $firstArg = null;
-            if (!empty($node->args) && isset($node->args[0])) {
-                $argVal = $node->args[0]->value;
-                if ($argVal instanceof Node\Scalar\String_) {
-                    $firstArg = $argVal->value;
-                } elseif ($argVal instanceof Node\Expr\ClassConstFetch && $argVal->class instanceof Node\Name) {
-                    $firstArg = $argVal->class->toString();
-                } else {
-                    $firstArg = '$dynamic';
-                }
+            $arguments = [];
+            foreach ($node->args as $arg) {
+                $arguments[] = $this->nodeSource($document->phpCode, $arg->value) ?? '$dynamic';
             }
 
-            $argCount = count($node->args);
-
-            return $this->functionTypeResolver->resolve($fnName, $firstArg, $document, $argCount);
+            return $this->functionTypeResolver->resolveCall($fnName, $arguments, $document);
         }
 
         if ($node instanceof Node\Expr\StaticCall && $node->class instanceof Node\Name) {
@@ -284,6 +278,23 @@ class DefaultPhpIntelligenceAdapter implements PhpIntelligenceAdapter
 
                     return "\\Illuminate\\Support\\Collection<int, {$itemType}>";
                 }
+                if (str_contains($parentType, 'Fluent')) {
+                    $arguments = [];
+                    foreach ($node->args as $arg) {
+                        $arguments[] = $this->nodeSource($document->phpCode, $arg->value) ?? '$dynamic';
+                    }
+                    $resolver = new DataPathResolver($this->project, functionTypeResolver: $this->functionTypeResolver);
+                    $type = $resolver->inferFluentMethodReturnType(
+                        TypeRef::fromString($parentType),
+                        $methodName,
+                        $arguments,
+                        new \App\Lsp\Document($document->virtualUri(), $document->phpCode),
+                    );
+
+                    if ((string) $type !== 'mixed') {
+                        return $type->displayName;
+                    }
+                }
                 $details = $this->hoverHelper->resolveMemberDetails($parentType, $methodName, false, 'item');
 
                 return $details['type'] ?? null;
@@ -313,6 +324,37 @@ class DefaultPhpIntelligenceAdapter implements PhpIntelligenceAdapter
         }
 
         return null;
+    }
+
+    protected function resolveAttributeDecoratedVariableType(string $varName, string $phpCode): ?string
+    {
+        if (!preg_match('/#\[\s*\\\\?([a-zA-Z0-9_\\\\]+)\s*(?:\(([^)]*)\))?\s*\]\s*(?:(?:public|protected|private|readonly|\s)+\s+)?(?:([a-zA-Z0-9_\\\\]+)\s+)?\$' . preg_quote($varName, '/') . '\b/', $phpCode, $attrM)) {
+            return null;
+        }
+
+        $attrName = $attrM[1];
+        $attrArg = !empty($attrM[2]) ? trim($attrM[2], '\'"') : null;
+        $typeHint = !empty($attrM[3]) ? $attrM[3] : null;
+
+        $attrRegistry = new AttributeIntelligenceRegistry($this->project);
+        $injectedType = $attrRegistry->resolveInjectedType($attrName, $attrArg);
+        if ($injectedType && $injectedType !== 'mixed') {
+            return $injectedType;
+        }
+
+        return $typeHint;
+    }
+
+    protected function nodeSource(string $code, Node $node): ?string
+    {
+        $start = $node->getStartFilePos();
+        $end = $node->getEndFilePos();
+
+        if ($start < 0 || $end < $start) {
+            return null;
+        }
+
+        return substr($code, $start, $end - $start + 1);
     }
 
     public function hover(VirtualDocument $document, array $position): ?array

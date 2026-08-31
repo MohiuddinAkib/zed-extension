@@ -328,6 +328,36 @@ test('DataPath completions work in Blade expressions, directives, and echoes', f
     @rmdir($tempDir);
 });
 
+test('DataPathResolver infers exact data_get and fluent path return types', function () {
+    $tempDir = sys_get_temp_dir() . '/datapath_types_' . uniqid();
+    @mkdir($tempDir . '/resources/views', 0777, true);
+
+    $project = createDataPathTestProject($tempDir);
+    $resolver = new DataPathResolver($project);
+
+    $content = <<<'PHP'
+<?php
+/** @var array{user: array{id: int, name: string, active?: bool}, tags: array<int, string>} $data */
+$name = data_get($data, 'user.name');
+PHP;
+    $doc = new Document('file://' . $tempDir . '/test.php', $content);
+
+    $nameType = $resolver->inferExpressionType("data_get(\$data, 'user.name')", $doc, ['line' => 2, 'character' => 0]);
+    expect($nameType?->displayName)->toBe('string');
+
+    $missingWithDefault = $resolver->inferExpressionType("data_get(\$data, 'user.email', 'n/a')", $doc, ['line' => 2, 'character' => 0]);
+    expect($missingWithDefault?->displayName)->toBe('string');
+
+    $fluentType = $resolver->inferExpressionType("fluent(\$data)", $doc, ['line' => 2, 'character' => 0]);
+    expect($fluentType?->displayName)->toBe('\\Illuminate\\Support\\Fluent<array{user: array{id: int, name: string, active?: bool}, tags: array<int, string>}>');
+
+    $fluentValueType = $resolver->inferExpressionType("fluent(\$data)->get('user.id')", $doc, ['line' => 2, 'character' => 0]);
+    expect($fluentValueType?->displayName)->toBe('int');
+
+    @rmdir($tempDir . '/resources/views');
+    @rmdir($tempDir);
+});
+
 test('DataPathCompletionProvider returns empty for dynamic/mixed sources, malformed paths, or invalid argument positions', function () {
     $tempDir = sys_get_temp_dir() . '/datapath_guard_' . uniqid();
     @mkdir($tempDir . '/resources/views', 0777, true);

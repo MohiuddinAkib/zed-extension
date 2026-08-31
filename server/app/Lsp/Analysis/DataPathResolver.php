@@ -116,8 +116,17 @@ class DataPathResolver
         // Check if Eloquent Model
         if ($this->semanticIndex !== null) {
             $models = $this->semanticIndex->models();
-            if (isset($models[$cleanClass])) {
-                $modelData = $models[$cleanClass];
+            $modelData = $models[$cleanClass] ?? null;
+            if ($modelData === null) {
+                foreach ($models as $indexedClass => $indexedModelData) {
+                    if (ltrim((string) $indexedClass, '\\') === $cleanClass || class_basename((string) $indexedClass) === class_basename($cleanClass)) {
+                        $modelData = $indexedModelData;
+                        break;
+                    }
+                }
+            }
+
+            if (is_array($modelData)) {
                 foreach ($modelData['attributes'] ?? [] as $attr) {
                     $attrName = $attr['name'] ?? '';
                     if ($attrName !== '') {
@@ -128,6 +137,13 @@ class DataPathResolver
                             'isOptional' => false,
                         ];
                     }
+                }
+                if (!isset($keys['id'])) {
+                    $keys['id'] = [
+                        'name'       => 'id',
+                        'type'       => TypeRef::fromString('int|string'),
+                        'isOptional' => false,
+                    ];
                 }
                 foreach ($modelData['relations'] ?? [] as $rel) {
                     $relName = $rel['name'] ?? '';
@@ -314,6 +330,10 @@ class DataPathResolver
             return null;
         }
 
+        if ($literalType = $this->inferLiteralType($exprCode)) {
+            return $literalType;
+        }
+
         // 1. If it's a variable: $var
         if (preg_match('/^\$([a-zA-Z0-9_]+)$/', $exprCode, $m)) {
             $varName = $m[1];
@@ -325,9 +345,28 @@ class DataPathResolver
             return $this->inferInlineArrayType($exprCode, $document, $position);
         }
 
+        if (preg_match('/^data_get\s*\((.*)\)$/s', $exprCode, $m)) {
+            $args = $this->functionTypeResolver->splitArguments($m[1]);
+            if (isset($args[0], $args[1])) {
+                return $this->inferPathValueType($args[0], $args[1], $document, $position, $args[2] ?? null);
+            }
+        }
+
+        if (preg_match('/^(.+)->(get|value|scope|string|integer|boolean|array|collection|date|enum|object)\s*\((.*)\)$/s', $exprCode, $m)) {
+            $source = $this->inferExpressionType($m[1], $document, $position);
+            $args = $this->functionTypeResolver->splitArguments($m[3]);
+            if ($source !== null) {
+                return $this->inferFluentMethodReturnType($source, $m[2], $args, $document, $position);
+            }
+        }
+
         // 3. If it's a fluent call: fluent($inner)
         if (preg_match('/^fluent\s*\((.+)\)$/s', $exprCode, $m)) {
-            return $this->inferExpressionType($m[1], $document, $position);
+            $inner = $this->inferExpressionType($m[1], $document, $position);
+
+            return $inner !== null && (string) $inner !== 'mixed'
+                ? TypeRef::fromString("\\Illuminate\\Support\\Fluent<{$inner->displayName}>")
+                : TypeRef::fromString('\\Illuminate\\Support\\Fluent');
         }
 
         // 4. Try parsing expression with PhpParser and BladeAstAnalyzer
@@ -344,6 +383,151 @@ class DataPathResolver
         }
 
         return null;
+    }
+
+    /**
+     * Infer the exact value type reached by a Laravel dot path.
+     */
+    public function inferPathValueType(
+        string $sourceExpression,
+        string $pathExpression,
+        Document $document,
+        ?array $position = null,
+        ?string $defaultExpression = null,
+    ): ?TypeRef {
+        $rootType = $this->inferExpressionType($sourceExpression, $document, $position);
+        if ($rootType === null || (string) $rootType === 'mixed') {
+            return null;
+        }
+
+        $path = $this->stringLiteralValue($pathExpression);
+        if ($path === null || $path === '') {
+            return $defaultExpression !== null
+                ? $this->inferExpressionType($defaultExpression, $document, $position)
+                : null;
+        }
+
+        $valueType = $this->traversePath($rootType, explode('.', $path));
+        if ($valueType === null) {
+            return $defaultExpression !== null
+                ? $this->inferExpressionType($defaultExpression, $document, $position)
+                : null;
+        }
+
+        if ($defaultExpression === null) {
+            return $valueType;
+        }
+
+        $defaultType = $this->inferExpressionType($defaultExpression, $document, $position);
+        if ($defaultType === null || (string) $defaultType === 'mixed') {
+            return $valueType;
+        }
+
+        return TypeRef::union([$valueType, $defaultType]);
+    }
+
+    /**
+     * @param  list<string>  $arguments
+     */
+    public function inferFluentMethodReturnType(
+        TypeRef $fluentType,
+        string $methodName,
+        array $arguments,
+        Document $document,
+        ?array $position = null,
+    ): TypeRef {
+        $innerType = $this->unwrapFluentType($fluentType) ?? $fluentType;
+        $pathArg = $arguments[0] ?? null;
+        $pathType = $pathArg !== null
+            ? $this->inferPathValueType('$__fluent_root__', $pathArg, $this->documentWithSyntheticRoot($document, $innerType), $position, $arguments[1] ?? null)
+            : null;
+
+        return match ($methodName) {
+            'get', 'value', 'scope' => $pathType ?? TypeRef::mixed(),
+            'string' => TypeRef::fromString('\\Illuminate\\Support\\Stringable'),
+            'integer' => TypeRef::fromString('int'),
+            'boolean', 'has' => TypeRef::fromString('bool'),
+            'array', 'only', 'except', 'toArray', 'jsonSerialize' => TypeRef::fromString('array'),
+            'collection' => $pathType !== null && (string) $pathType !== 'mixed'
+                ? TypeRef::fromString("\\Illuminate\\Support\\Collection<int, {$this->collectionItemType($pathType)}>")
+                : TypeRef::fromString('\\Illuminate\\Support\\Collection'),
+            'date' => TypeRef::fromString('\\Illuminate\\Support\\Carbon'),
+            'object' => TypeRef::fromString('object'),
+            'toJson' => TypeRef::fromString('string'),
+            'set' => $fluentType,
+            default => TypeRef::mixed(),
+        };
+    }
+
+    protected function inferLiteralType(string $expression): ?TypeRef
+    {
+        $expression = trim($expression);
+
+        if ((str_starts_with($expression, "'") && str_ends_with($expression, "'"))
+            || (str_starts_with($expression, '"') && str_ends_with($expression, '"'))) {
+            return TypeRef::fromString('string');
+        }
+
+        if (preg_match('/^-?\d+$/', $expression)) {
+            return TypeRef::fromString('int');
+        }
+
+        if (preg_match('/^-?\d+\.\d+$/', $expression)) {
+            return TypeRef::fromString('float');
+        }
+
+        if (in_array(strtolower($expression), ['true', 'false'], true)) {
+            return TypeRef::fromString('bool');
+        }
+
+        if (strtolower($expression) === 'null') {
+            return TypeRef::fromString('null');
+        }
+
+        return null;
+    }
+
+    protected function stringLiteralValue(string $expression): ?string
+    {
+        $expression = trim($expression);
+        if ((str_starts_with($expression, "'") && str_ends_with($expression, "'"))
+            || (str_starts_with($expression, '"') && str_ends_with($expression, '"'))) {
+            return stripcslashes(substr($expression, 1, -1));
+        }
+
+        return null;
+    }
+
+    protected function unwrapFluentType(TypeRef $typeRef): ?TypeRef
+    {
+        if ($typeRef->isGeneric()) {
+            $base = ltrim(preg_replace('/<.*>$/', '', $typeRef->displayName), '\\');
+            if (in_array($base, ['Illuminate\Support\Fluent', 'Fluent'], true) && isset($typeRef->children[0])) {
+                return $typeRef->children[0];
+            }
+        }
+
+        return null;
+    }
+
+    protected function documentWithSyntheticRoot(Document $document, TypeRef $rootType): Document
+    {
+        return new Document($document->uri, "/** @var {$rootType->displayName} \$__fluent_root__ */\n" . $document->content);
+    }
+
+    protected function collectionItemType(TypeRef $typeRef): string
+    {
+        if ($typeRef->isGeneric() && !empty($typeRef->children)) {
+            return count($typeRef->children) > 1
+                ? $typeRef->children[1]->displayName
+                : $typeRef->children[0]->displayName;
+        }
+
+        if ($typeRef->isShape() || $typeRef->displayName === 'array') {
+            return 'mixed';
+        }
+
+        return $typeRef->displayName;
     }
 
     /**
