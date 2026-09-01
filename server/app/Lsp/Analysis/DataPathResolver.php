@@ -149,9 +149,22 @@ class DataPathResolver
                     $relName = $rel['name'] ?? '';
                     if ($relName !== '') {
                         $relRelated = $rel['related'] ?? 'Model';
+                        $relType = strtolower($rel['type'] ?? '');
+
+                        // Relationship types that return an Eloquent Collection
+                        $collectionRelations = [
+                            'hasmany', 'belongstomany', 'morphmany', 'morphtomany',
+                            'morphedbymany', 'hasmanythroughone', 'hasmanythrough',
+                        ];
+
+                        $relatedFqn = '\\' . ltrim($relRelated, '\\');
+                        $relatedTypeStr = in_array($relType, $collectionRelations, true)
+                            ? '\\Illuminate\\Database\\Eloquent\\Collection<' . $relatedFqn . '>'
+                            : $relatedFqn;
+
                         $keys[$relName] = [
                             'name'       => $relName,
-                            'type'       => TypeRef::fromString('\\' . ltrim($relRelated, '\\')),
+                            'type'       => TypeRef::fromString($relatedTypeStr),
                             'isOptional' => false,
                         ];
                     }

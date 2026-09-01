@@ -202,6 +202,17 @@ PHP;
     $labels3 = array_column($items3, 'label');
     expect($labels3)->toContain('bio', 'city');
 
+    // 4. HasMany relation should resolve to Collection<Model>, not bare model
+    $resolver = new \App\Lsp\Analysis\DataPathResolver($project);
+    $userTypeRef = \App\Lsp\Semantics\TypeRef::fromString('\\App\\Models\\User');
+    $keys = $resolver->resolveKeysForType($userTypeRef);
+
+    // HasOne 'profile' → bare model
+    expect($keys['profile']['type']->displayName)->toBe('\\App\\Models\\Profile');
+
+    // HasMany 'posts' → Collection<Post>
+    expect($keys['posts']['type']->displayName)->toBe('\\Illuminate\\Database\\Eloquent\\Collection<\\App\\Models\\Post>');
+
     @rmdir($tempDir . '/resources/views');
     @rmdir($tempDir);
 });
