@@ -10,6 +10,7 @@ use App\Lsp\Analysis\BladeScopeResolver;
 use App\Lsp\Analysis\ComponentRegistry;
 use App\Lsp\Analysis\DefaultPhpIntelligenceAdapter;
 use App\Lsp\Analysis\FunctionTypeResolver;
+use App\Lsp\Analysis\MacroRegistry;
 use App\Lsp\Analysis\SemanticIndex;
 use App\Lsp\Contracts\CodeActionProvider;
 use App\Lsp\Contracts\CompletionProvider;
@@ -272,6 +273,12 @@ class FeatureRegistry
                 return new BladeAstAnalyzer($project, $resolver);
             });
         }
+
+        if (!$this->container->bound(MacroRegistry::class)) {
+            $this->container->singleton(MacroRegistry::class, function () {
+                return new MacroRegistry($this->container->make(Project::class));
+            });
+        }
     }
 
     /**
@@ -360,6 +367,14 @@ class FeatureRegistry
     public function scopeResolver(): BladeScopeResolver
     {
         return $this->container->make(BladeScopeResolver::class);
+    }
+
+    /**
+     * Resolve the Macro registry.
+     */
+    public function macroRegistry(): MacroRegistry
+    {
+        return $this->container->make(MacroRegistry::class);
     }
 
     /**

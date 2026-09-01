@@ -8,6 +8,7 @@ use App\Lsp\Analysis\BladeAstAnalyzer;
 use App\Lsp\Analysis\BladeScopeResolver;
 use App\Lsp\Analysis\DocBlockParser;
 use App\Lsp\Analysis\FunctionTypeResolver;
+use App\Lsp\Analysis\MacroRegistry;
 use App\Lsp\Analysis\SemanticIndex;
 use App\Lsp\Contracts\CompletionProvider;
 use App\Lsp\Document;
@@ -15,6 +16,7 @@ use App\Lsp\Features\ClassIndex\ClassRegistry;
 use App\Lsp\Features\Facades\FacadeMap;
 use App\Lsp\Features\Functions\GlobalFunctionRegistry;
 use App\Lsp\Project;
+use App\Lsp\Semantics\MacroSymbol;
 use App\Lsp\Support\FileUri;
 use App\Lsp\Support\Utf16Position;
 use Illuminate\Container\Container;
@@ -63,15 +65,19 @@ class BladeMemberCompletionProvider implements CompletionProvider
 
     protected FunctionTypeResolver $functionTypeResolver;
 
+    protected ?MacroRegistry $macroRegistry = null;
+
     protected bool $autoloaderRegistered = false;
 
     public function __construct(
         protected Project $project,
         ?SemanticIndex $semanticIndex = null,
         ?FunctionTypeResolver $functionTypeResolver = null,
+        ?MacroRegistry $macroRegistry = null,
     ) {
         $this->semanticIndex = $semanticIndex ?? $this->resolveSemanticIndex();
         $this->functionTypeResolver = $functionTypeResolver ?? new FunctionTypeResolver($this->project, semanticIndex: $this->semanticIndex);
+        $this->macroRegistry = $macroRegistry ?? $this->resolveMacroRegistry();
         $this->bladeAnalyzer = new BladeAstAnalyzer($this->project, $this->functionTypeResolver);
         $this->scopeResolver = new BladeScopeResolver($this->project, $this->bladeAnalyzer);
         $this->docBlockParser = new DocBlockParser;
@@ -87,6 +93,17 @@ class BladeMemberCompletionProvider implements CompletionProvider
         }
 
         return new SemanticIndex($this->project);
+    }
+
+    protected function resolveMacroRegistry(): MacroRegistry
+    {
+        $container = Container::getInstance();
+
+        if ($container->bound(MacroRegistry::class)) {
+            return $container->make(MacroRegistry::class);
+        }
+
+        return new MacroRegistry($this->project);
     }
 
 
@@ -607,6 +624,46 @@ class BladeMemberCompletionProvider implements CompletionProvider
             foreach ($builderMembers as $bName => $bMember) {
                 if (!isset($members[$bName])) {
                     $members[$bName] = $bMember;
+                }
+            }
+        }
+
+        // 7. Macro methods from MacroRegistry
+        if ($this->macroRegistry !== null) {
+            $macros = $this->macroRegistry->getMacrosForClass($baseClass);
+            if ($cleanType !== $baseClass) {
+                $macros = array_merge($this->macroRegistry->getMacrosForClass($cleanType), $macros);
+            }
+            foreach ($macros as $mName => $macro) {
+                if (!isset($members[$mName])) {
+                    $numRequired = 0;
+                    foreach ($macro->parameters as $param) {
+                        if ($param->required) {
+                            $numRequired++;
+                        }
+                    }
+                    $paramSignature = '(' . implode(', ', array_map(fn ($p) => $p->formatted(), $macro->parameters)) . ')';
+                    $returnType = $macro->returnType ? $macro->returnType->displayName : 'mixed';
+                    $detail = "{$paramSignature}: {$returnType} (macro)";
+                    $doc = "**Macro on `{$macro->targetClass}`**\n\n```php\npublic function {$mName}{$paramSignature}: {$returnType};\n```";
+                    if (!empty($macro->documentation)) {
+                        $doc .= "\n\n" . $macro->documentation;
+                    }
+                    if ($macro->sourcePath) {
+                        $doc .= "\n\n*Source:* `{$macro->sourcePath}:{$macro->sourceLine}`";
+                    }
+
+                    $members[$mName] = [
+                        'name'           => $mName,
+                        'kind'           => 2, // Method
+                        'detail'         => $detail,
+                        'documentation'  => $doc,
+                        'isMethod'       => true,
+                        'requiredParams' => $numRequired,
+                        'snippet'        => $numRequired > 0 ? "{$mName}(\${1})" : "{$mName}()",
+                        'paramSignature' => $paramSignature,
+                        'returnType'     => $returnType,
+                    ];
                 }
             }
         }
@@ -1443,6 +1500,72 @@ class BladeMemberCompletionProvider implements CompletionProvider
                     'textEdit' => [
                         'range'   => $range,
                         'newText' => 'class',
+                    ],
+                ];
+            }
+        }
+
+        // 5. Macro methods from MacroRegistry
+        if ($this->macroRegistry !== null) {
+            $classesToQuery = array_unique(array_filter([
+                $classOrAlias,
+                $targetClass,
+                $accessorClass,
+                ltrim($classOrAlias, '\\'),
+                $targetClass ? ltrim($targetClass, '\\') : null,
+                $accessorClass ? ltrim($accessorClass, '\\') : null,
+            ]));
+
+            $macros = [];
+            foreach ($classesToQuery as $cls) {
+                foreach ($this->macroRegistry->getMacrosForClass($cls) as $mName => $macro) {
+                    $macros[$mName] = $macro;
+                }
+            }
+
+            foreach ($macros as $mName => $macro) {
+                if (isset($seenMembers[$mName])) {
+                    continue;
+                }
+                if ($memberPrefix !== '' && !str_starts_with(strtolower($mName), strtolower($memberPrefix))) {
+                    continue;
+                }
+                $seenMembers[$mName] = true;
+
+                $numReq = 0;
+                foreach ($macro->parameters as $param) {
+                    if ($param->required) {
+                        $numReq++;
+                    }
+                }
+                $sig = '(' . implode(', ', array_map(fn ($p) => $p->formatted(), $macro->parameters)) . ')';
+                $retType = $macro->returnType ? $macro->returnType->displayName : 'mixed';
+                $newText = $numReq > 0 ? "{$mName}(\${1})" : "{$mName}()";
+
+                $doc = "**{$classOrAlias}::{$mName}** (macro on `{$macro->targetClass}`)\n\n```php\npublic static function {$mName}{$sig}: {$retType};\n```";
+                if (!empty($macro->documentation)) {
+                    $doc .= "\n\n" . $macro->documentation;
+                }
+                if ($macro->sourcePath) {
+                    $doc .= "\n\n*Source:* `{$macro->sourcePath}:{$macro->sourceLine}`";
+                }
+
+                $completions[] = [
+                    'label'        => $mName,
+                    'labelDetails' => [
+                        'detail'      => $sig,
+                        'description' => $retType,
+                    ],
+                    'kind'             => 2, // Method
+                    'detail'           => "public static {$mName}{$sig}: {$retType} (macro)",
+                    'insertTextFormat' => 2, // Snippet format
+                    'documentation'    => [
+                        'kind'  => 'markdown',
+                        'value' => $doc,
+                    ],
+                    'textEdit' => [
+                        'range'   => $range,
+                        'newText' => $newText,
                     ],
                 ];
             }

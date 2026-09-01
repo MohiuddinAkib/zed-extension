@@ -9,6 +9,7 @@ use App\Lsp\Analysis\BladePhpAstAnalyzer;
 use App\Lsp\Analysis\BladeScopeResolver;
 use App\Lsp\Analysis\DocBlockParser;
 use App\Lsp\Analysis\FunctionTypeResolver;
+use App\Lsp\Analysis\MacroRegistry;
 use App\Lsp\Analysis\SemanticIndex;
 use App\Lsp\Contracts\HoverProvider;
 use App\Lsp\Document;
@@ -62,15 +63,19 @@ class BladeMemberHoverProvider implements HoverProvider
 
     protected FunctionTypeResolver $functionTypeResolver;
 
+    protected ?MacroRegistry $macroRegistry = null;
+
     protected bool $autoloaderRegistered = false;
 
     public function __construct(
         protected Project $project,
         ?SemanticIndex $semanticIndex = null,
         ?FunctionTypeResolver $functionTypeResolver = null,
+        ?MacroRegistry $macroRegistry = null,
     ) {
         $this->semanticIndex = $semanticIndex ?? $this->resolveSemanticIndex();
         $this->functionTypeResolver = $functionTypeResolver ?? new FunctionTypeResolver($this->project, semanticIndex: $this->semanticIndex);
+        $this->macroRegistry = $macroRegistry ?? $this->resolveMacroRegistry();
         $this->bladeAnalyzer = new BladeAstAnalyzer($this->project, $this->functionTypeResolver);
         $this->bladePhpAstAnalyzer = new BladePhpAstAnalyzer;
         $this->scopeResolver = new BladeScopeResolver($this->project, $this->bladeAnalyzer);
@@ -86,6 +91,17 @@ class BladeMemberHoverProvider implements HoverProvider
         }
 
         return new SemanticIndex($this->project);
+    }
+
+    protected function resolveMacroRegistry(): MacroRegistry
+    {
+        $container = Container::getInstance();
+
+        if ($container->bound(MacroRegistry::class)) {
+            return $container->make(MacroRegistry::class);
+        }
+
+        return new MacroRegistry($this->project);
     }
 
 
@@ -562,6 +578,31 @@ class BladeMemberHoverProvider implements HoverProvider
                     'documentation' => (string) ($member['documentation'] ?? ''),
                     'source'        => null,
                     'line'          => null,
+                ];
+            }
+        }
+
+        // 7. Macro methods from MacroRegistry
+        if ($this->macroRegistry !== null) {
+            $macro = $this->macroRegistry->getMacro($baseClass, $memberName);
+            if ($macro === null && $cleanType !== $baseClass) {
+                $macro = $this->macroRegistry->getMacro($cleanType, $memberName);
+            }
+
+            if ($macro !== null) {
+                $paramSignature = '(' . implode(', ', array_map(fn ($p) => $p->formatted(), $macro->parameters)) . ')';
+                $returnType = $macro->returnType ? $macro->returnType->displayName : 'mixed';
+                $shortTarget = class_basename($macro->targetClass);
+
+                return [
+                    'title'         => "{$macro->targetClass}::{$memberName}()",
+                    'type'          => $returnType,
+                    'origin'        => "Macro ({$shortTarget})",
+                    'isMethod'      => true,
+                    'signature'     => "{$paramSignature}: {$returnType}",
+                    'documentation' => $macro->documentation,
+                    'source'        => $macro->sourcePath ? $this->relativePath($macro->sourcePath) : null,
+                    'line'          => $macro->sourceLine,
                 ];
             }
         }

@@ -8,6 +8,7 @@ use App\Lsp\Analysis\BladeAstAnalyzer;
 use App\Lsp\Analysis\BladePhpAstAnalyzer;
 use App\Lsp\Analysis\BladeScopeResolver;
 use App\Lsp\Analysis\FunctionTypeResolver;
+use App\Lsp\Analysis\MacroRegistry;
 use App\Lsp\Analysis\SemanticIndex;
 use App\Lsp\Contracts\LinkProvider;
 use App\Lsp\Document;
@@ -31,19 +32,23 @@ class BladeMemberLinkProvider implements LinkProvider
 
     protected FunctionTypeResolver $functionTypeResolver;
 
+    protected ?MacroRegistry $macroRegistry = null;
+
     protected bool $autoloaderRegistered = false;
 
     public function __construct(
         protected Project $project,
         ?SemanticIndex $semanticIndex = null,
         ?FunctionTypeResolver $functionTypeResolver = null,
+        ?MacroRegistry $macroRegistry = null,
     ) {
         $this->semanticIndex = $semanticIndex ?? $this->resolveSemanticIndex();
         $this->functionTypeResolver = $functionTypeResolver ?? new FunctionTypeResolver($this->project, semanticIndex: $this->semanticIndex);
+        $this->macroRegistry = $macroRegistry ?? $this->resolveMacroRegistry();
         $this->bladeAnalyzer = new BladeAstAnalyzer($this->project, $this->functionTypeResolver);
         $this->bladePhpAstAnalyzer = new BladePhpAstAnalyzer;
         $this->scopeResolver = new BladeScopeResolver($this->project, $this->bladeAnalyzer);
-        $this->hoverHelper = new BladeMemberHoverProvider($this->project, $this->semanticIndex, $this->functionTypeResolver);
+        $this->hoverHelper = new BladeMemberHoverProvider($this->project, $this->semanticIndex, $this->functionTypeResolver, $this->macroRegistry);
     }
 
     protected function resolveSemanticIndex(): SemanticIndex
@@ -55,6 +60,17 @@ class BladeMemberLinkProvider implements LinkProvider
         }
 
         return new SemanticIndex($this->project);
+    }
+
+    protected function resolveMacroRegistry(): MacroRegistry
+    {
+        $container = Container::getInstance();
+
+        if ($container->bound(MacroRegistry::class)) {
+            return $container->make(MacroRegistry::class);
+        }
+
+        return new MacroRegistry($this->project);
     }
 
     /**
