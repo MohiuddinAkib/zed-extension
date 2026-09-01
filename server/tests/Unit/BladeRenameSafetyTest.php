@@ -193,3 +193,184 @@ BLADE;
     expect($provider->prepareRename($doc, ['line' => 18, 'character' => 15]))->toBeNull();
 });
 
+test('rename handles directive scopes, loop variables, and nested lexical shadowing accurately', function () {
+    $tempDir = sys_get_temp_dir() . '/rename_scopes_' . uniqid();
+
+    $mockIndex = Mockery::mock(ProjectIndex::class);
+    $mockIndex->shouldReceive('bladeComponents')->andReturn(['components' => [], 'prefixes' => ['x-']]);
+    $mockIndex->shouldReceive('viewVariables')->andReturn(['views' => [], 'globals' => []]);
+    $mockIndex->shouldReceive('views')->andReturn(collect([]));
+    $mockIndex->shouldReceive('models')->andReturn([]);
+
+    $project = new Project(FileUri::of($tempDir), [], $mockIndex, new ScriptRunner($tempDir, ['php']));
+    $provider = new BladeVariableRenameProvider($project);
+
+    $content = <<<'BLADE'
+<p>Top: {{ $item->title }}</p>
+@foreach($items as $item)
+    <p>Outer item: {{ $item->name }}</p>
+    @foreach($item->children as $item)
+        <span>Inner item: {{ $item->subName }}</span>
+    @endforeach
+    <p>Outer item again: {{ $item->name }}</p>
+@endforeach
+<p>Bottom: {{ $item->title }}</p>
+BLADE;
+
+    $doc = new Document('file://' . $tempDir . '/scopes.blade.php', $content);
+
+    // Test 1: Renaming outer template variable $item (cursor at line 0, col 12) to $globalItem
+    $resultTemplate = $provider->rename($doc, ['line' => 0, 'character' => 12], 'globalItem');
+    expect($resultTemplate)->not->toBeNull();
+    $editsTemplate = $resultTemplate['changes'][$doc->uri];
+    // Should rename line 0 and line 8 ($item->title), but NOT line 1, 2, 3, 4, 6
+    expect($editsTemplate)->toHaveCount(2);
+    expect($editsTemplate[0]['range']['start']['line'])->toBe(0);
+    expect($editsTemplate[0]['newText'])->toBe('globalItem');
+    expect($editsTemplate[1]['range']['start']['line'])->toBe(8);
+    expect($editsTemplate[1]['newText'])->toBe('globalItem');
+
+    // Test 2: Renaming outer loop $item (cursor at line 2, col 23) to $parentItem
+    $resultOuter = $provider->rename($doc, ['line' => 2, 'character' => 23], 'parentItem');
+    expect($resultOuter)->not->toBeNull();
+    $editsOuter = $resultOuter['changes'][$doc->uri];
+    // Should rename:
+    // - Line 1: 'as $item'
+    // - Line 2: '$item->name'
+    // - Line 3: '$item->children' (source of inner loop)
+    // - Line 6: '$item->name'
+    // Should NOT rename: line 0, line 3 'as $item', line 4, line 8
+    expect($editsOuter)->toHaveCount(4);
+    expect($editsOuter[0]['range']['start']['line'])->toBe(1);
+    expect($editsOuter[0]['newText'])->toBe('parentItem');
+    expect($editsOuter[1]['range']['start']['line'])->toBe(2);
+    expect($editsOuter[1]['newText'])->toBe('parentItem');
+    expect($editsOuter[2]['range']['start']['line'])->toBe(3);
+    expect($editsOuter[2]['newText'])->toBe('parentItem');
+    expect($editsOuter[3]['range']['start']['line'])->toBe(6);
+    expect($editsOuter[3]['newText'])->toBe('parentItem');
+
+    // Test 3: Renaming inner loop $item (cursor at line 4, col 30) to $child
+    $resultInner = $provider->rename($doc, ['line' => 4, 'character' => 30], 'child');
+    expect($resultInner)->not->toBeNull();
+    $editsInner = $resultInner['changes'][$doc->uri];
+    // Should rename:
+    // - Line 3: 'as $item' (inner declaration)
+    // - Line 4: '$item->subName'
+    // Should NOT rename: line 0, 1, 2, 3 ($item->children), 6, 8
+    expect($editsInner)->toHaveCount(2);
+    expect($editsInner[0]['range']['start']['line'])->toBe(3);
+    expect($editsInner[0]['newText'])->toBe('child');
+    expect($editsInner[1]['range']['start']['line'])->toBe(4);
+    expect($editsInner[1]['newText'])->toBe('child');
+});
+
+test('rename handles forelse and for loops correctly', function () {
+    $tempDir = sys_get_temp_dir() . '/rename_loops_' . uniqid();
+
+    $mockIndex = Mockery::mock(ProjectIndex::class);
+    $mockIndex->shouldReceive('bladeComponents')->andReturn(['components' => [], 'prefixes' => ['x-']]);
+    $mockIndex->shouldReceive('viewVariables')->andReturn(['views' => [], 'globals' => []]);
+    $mockIndex->shouldReceive('views')->andReturn(collect([]));
+    $mockIndex->shouldReceive('models')->andReturn([]);
+
+    $project = new Project(FileUri::of($tempDir), [], $mockIndex, new ScriptRunner($tempDir, ['php']));
+    $provider = new BladeVariableRenameProvider($project);
+
+    // 1. @forelse
+    $forelseBlade = <<<'BLADE'
+<p>{{ $user->name }}</p>
+@forelse($users as $user)
+    <span>{{ $user->email }}</span>
+@empty
+    <p>No users</p>
+@endforelse
+BLADE;
+    $forelseDoc = new Document('file://' . $tempDir . '/forelse.blade.php', $forelseBlade);
+
+    // Rename inner $user inside forelse body (line 2, col 13) to $client
+    $resForelse = $provider->rename($forelseDoc, ['line' => 2, 'character' => 13], 'client');
+    expect($resForelse)->not->toBeNull();
+    $editsForelse = $resForelse['changes'][$forelseDoc->uri];
+    expect($editsForelse)->toHaveCount(2);
+    expect($editsForelse[0]['range']['start']['line'])->toBe(1);
+    expect($editsForelse[0]['newText'])->toBe('client');
+    expect($editsForelse[1]['range']['start']['line'])->toBe(2);
+    expect($editsForelse[1]['newText'])->toBe('client');
+
+    // 2. @for
+    $forBlade = <<<'BLADE'
+<p>{{ $i }}</p>
+@for($i = 0; $i < 10; $i++)
+    <span>Count: {{ $i }}</span>
+@endfor
+<p>{{ $i }}</p>
+BLADE;
+    $forDoc = new Document('file://' . $tempDir . '/for.blade.php', $forBlade);
+
+    // Rename $i inside @for body (line 2, col 20) to $index
+    $resFor = $provider->rename($forDoc, ['line' => 2, 'character' => 20], 'index');
+    expect($resFor)->not->toBeNull();
+    $editsFor = $resFor['changes'][$forDoc->uri];
+    // 3 occurrences in line 1 header ($i = 0, $i < 10, $i++) and 1 occurrence in line 2
+    expect($editsFor)->toHaveCount(4);
+    expect($editsFor[0]['range']['start']['line'])->toBe(1);
+    expect($editsFor[1]['range']['start']['line'])->toBe(1);
+    expect($editsFor[2]['range']['start']['line'])->toBe(1);
+    expect($editsFor[3]['range']['start']['line'])->toBe(2);
+    foreach ($editsFor as $edit) {
+        expect($edit['newText'])->toBe('index');
+    }
+});
+
+test('textDocument/prepareRename and textDocument/rename LSP protocol handlers function correctly', function () {
+    $tempDir = sys_get_temp_dir() . '/rename_lsp_' . uniqid();
+    $uri = 'file://' . $tempDir . '/test.blade.php';
+
+    $mockIndex = Mockery::mock(ProjectIndex::class);
+    $mockIndex->shouldReceive('bladeComponents')->andReturn(['components' => [], 'prefixes' => ['x-']]);
+    $mockIndex->shouldReceive('viewVariables')->andReturn(['views' => [], 'globals' => []]);
+    $mockIndex->shouldReceive('views')->andReturn(collect([]));
+    $mockIndex->shouldReceive('models')->andReturn([]);
+
+    $project = new Project(FileUri::of($tempDir), [], $mockIndex, new ScriptRunner($tempDir, ['php']));
+    $documents = new \App\Lsp\DocumentManager();
+    $documents->open($uri, '<div>{{ $user->name }}</div>');
+
+    // 1. PrepareRename handler
+    $prepHandler = new \App\Lsp\Methods\TextDocumentPrepareRename($documents, $project);
+    $prepReq = \App\Lsp\Transport\JsonRpcRequest::from([
+        'jsonrpc' => '2.0',
+        'id' => 10,
+        'method' => 'textDocument/prepareRename',
+        'params' => [
+            'textDocument' => ['uri' => $uri],
+            'position' => ['line' => 0, 'character' => 9],
+        ],
+    ]);
+    $prepRes = $prepHandler->handle($prepReq);
+    $prepData = $prepRes->toArray()['result'] ?? [];
+    expect($prepData)->toHaveKey('placeholder', 'user');
+    expect($prepData)->toHaveKey('range');
+
+    // 2. Rename handler
+    $renameHandler = new \App\Lsp\Methods\TextDocumentRename($documents, $project);
+    $renameReq = \App\Lsp\Transport\JsonRpcRequest::from([
+        'jsonrpc' => '2.0',
+        'id' => 11,
+        'method' => 'textDocument/rename',
+        'params' => [
+            'textDocument' => ['uri' => $uri],
+            'position' => ['line' => 0, 'character' => 9],
+            'newName' => '$client',
+        ],
+    ]);
+    $renameRes = $renameHandler->handle($renameReq);
+    $renameData = $renameRes->toArray()['result'] ?? [];
+    expect($renameData)->toHaveKey('changes');
+    expect($renameData['changes'][$uri])->toHaveCount(1);
+    expect($renameData['changes'][$uri][0]['newText'])->toBe('client');
+});
+
+
+

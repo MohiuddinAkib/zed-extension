@@ -8,9 +8,18 @@ use App\Lsp\Analysis\BladePhpAstAnalyzer;
 use App\Lsp\Analysis\BladeScopeResolver;
 use App\Lsp\Document;
 use App\Lsp\Project;
+use Stillat\BladeParser\Document\Document as BladeDocument;
 
 class BladeVariableRenameProvider
 {
+    public const RESERVED_VARIABLES = [
+        'loop',
+        'errors',
+        '__env',
+        'this',
+        'app',
+    ];
+
     protected BladePhpAstAnalyzer $astAnalyzer;
     protected BladeScopeResolver $scopeResolver;
 
@@ -20,14 +29,6 @@ class BladeVariableRenameProvider
         $this->astAnalyzer = new BladePhpAstAnalyzer();
         $this->scopeResolver = new BladeScopeResolver($this->project);
     }
-
-    public const RESERVED_VARIABLES = [
-        'loop',
-        'errors',
-        '__env',
-        'this',
-        'app',
-    ];
 
     /**
      * Prepare rename for the given document and position.
@@ -49,25 +50,7 @@ class BladeVariableRenameProvider
         }
 
         $expressions = $this->astAnalyzer->extractAllExpressions($document->content);
-
-        $targetExpr = null;
-        foreach ($expressions as $expr) {
-            if ($expr['kind'] !== 'variable') {
-                continue;
-            }
-
-            if ((int) $expr['startLine'] !== $lineNumber) {
-                continue;
-            }
-
-            $startCol = (int) $expr['startCol'];
-            $endCol = (int) $expr['endCol'];
-
-            if ($character >= $startCol && $character <= $endCol) {
-                $targetExpr = $expr;
-                break;
-            }
-        }
+        $targetExpr = $this->findVariableExpressionAtPosition($expressions, $lineNumber, $character);
 
         if ($targetExpr === null) {
             return null;
@@ -110,70 +93,105 @@ class BladeVariableRenameProvider
             return null;
         }
 
-        $line = explode("\n", $document->content)[$lineNumber] ?? '';
-        $varInfo = $this->findVariableAtPosition($line, $character);
+        $expressions = $this->astAnalyzer->extractAllExpressions($document->content);
+        $targetExpr = $this->findVariableExpressionAtPosition($expressions, $lineNumber, $character);
 
-        if ($varInfo === null) {
+        if ($targetExpr === null) {
             return null;
         }
 
-        $targetVarName = $varInfo['name'];
-        $cleanNewName = ltrim($newName, '$');
+        $targetVarName = $targetExpr['name'];
+        if (in_array($targetVarName, self::RESERVED_VARIABLES, true)) {
+            return null;
+        }
 
+        $cleanNewName = ltrim($newName, '$');
         if (!preg_match('/^[a-zA-Z_\x80-\xff][a-zA-Z0-9_\x80-\xff]*$/', $cleanNewName)) {
             return null;
         }
 
-        // Determine lexical scope boundaries for this variable at cursor position
-        $scope = $this->scopeResolver->resolveAtPosition($document, $lineNumber, $character);
-        $varSymbol = $scope->variables[$targetVarName] ?? null;
+        if (in_array($cleanNewName, self::RESERVED_VARIABLES, true)) {
+            return null;
+        }
+
+        // Build directive scope hierarchy
+        $scopes = $this->buildLoopScopes($document->content);
+
+        // Find the declaring loop scope for this target variable at cursor position
+        $declaringScope = $this->findDeclaringScopeForPosition($scopes, $targetVarName, (int) $targetExpr['startOffset']);
 
         $minLine = 0;
         $maxLine = PHP_INT_MAX;
+        $excludedOffsetRanges = [];
 
-        if ($varSymbol && $varSymbol->origin && $varSymbol->origin->name === '@foreach') {
-            // Find enclosing loop range
-            $ranges = $this->findEnclosingLoopRange($document->content, $lineNumber + 1);
-            if ($ranges !== null) {
-                $minLine = $ranges['startLine'] - 1;
-                $maxLine = $ranges['endLine'] - 1;
+        if ($declaringScope !== null) {
+            $minLine = $declaringScope->startLine;
+            $maxLine = $declaringScope->endLine;
+
+            // Expressions on declaringScope->startLine before its declaration offset belong to outer scope
+            if ($declaringScope->declarationOffset > $declaringScope->startOffset) {
+                $excludedOffsetRanges[] = [
+                    'start' => $declaringScope->startOffset,
+                    'end' => $declaringScope->declarationOffset - 1,
+                ];
             }
+
+            // Exclude child scopes that shadow this variable
+            $this->collectShadowExclusions($declaringScope->children, $targetVarName, $excludedOffsetRanges);
+        } else {
+            // Template level: exclude all loop scopes declaring $targetVarName
+            $this->collectShadowExclusions($scopes, $targetVarName, $excludedOffsetRanges);
         }
 
-        $lines = explode("\n", $document->content);
         $edits = [];
         $seenRanges = [];
 
-        // AST expressions extraction (includes echo, directives, @php blocks, bound attributes)
-        $expressions = $this->astAnalyzer->extractAllExpressions($document->content);
-
         foreach ($expressions as $expr) {
+            if ($expr['kind'] !== 'variable' || $expr['name'] !== $targetVarName) {
+                continue;
+            }
+
             $eLine = (int) $expr['startLine'];
             if ($eLine < $minLine || $eLine > $maxLine) {
                 continue;
             }
 
-            if ($expr['kind'] === 'variable' && $expr['name'] === $targetVarName) {
-                $startCol = (int) $expr['startCol'];
-                $endCol = (int) $expr['endCol'];
-                $key = "{$eLine}:{$startCol}";
+            $startOffset = (int) $expr['startOffset'];
 
-                if (!isset($seenRanges[$key])) {
-                    $seenRanges[$key] = true;
-                    $edits[] = [
-                        'range' => [
-                            'start' => ['line' => $eLine, 'character' => $startCol],
-                            'end' => ['line' => $eLine, 'character' => $endCol],
-                        ],
-                        'newText' => $cleanNewName,
-                    ];
-                }
+            // Check if this expression falls in any excluded/shadowed offset range
+            if ($this->isOffsetExcluded($startOffset, $excludedOffsetRanges)) {
+                continue;
+            }
+
+            $varStartCol = (int) $expr['startCol'] + 1;
+            $varEndCol = (int) $expr['endCol'];
+            $key = "{$eLine}:{$varStartCol}";
+
+            if (!isset($seenRanges[$key])) {
+                $seenRanges[$key] = true;
+                $edits[] = [
+                    'range' => [
+                        'start' => ['line' => $eLine, 'character' => $varStartCol],
+                        'end' => ['line' => $eLine, 'character' => $varEndCol],
+                    ],
+                    'newText' => $cleanNewName,
+                ];
             }
         }
 
         if (empty($edits)) {
             return null;
         }
+
+        // Sort edits in document order (line asc, character asc)
+        usort($edits, function (array $a, array $b): int {
+            $lineCmp = ($a['range']['start']['line'] ?? 0) <=> ($b['range']['start']['line'] ?? 0);
+            if ($lineCmp !== 0) {
+                return $lineCmp;
+            }
+
+            return ($a['range']['start']['character'] ?? 0) <=> ($b['range']['start']['character'] ?? 0);
+        });
 
         return [
             'changes' => [
@@ -182,68 +200,153 @@ class BladeVariableRenameProvider
         ];
     }
 
-    protected function findEnclosingLoopRange(string $content, int $targetLine1Indexed): ?array
+    /**
+     * Find matching variable expression at given line and column.
+     *
+     * @param  array<int, array<string, mixed>>  $expressions
+     * @return array<string, mixed>|null
+     */
+    protected function findVariableExpressionAtPosition(array $expressions, int $lineNumber, int $character): ?array
     {
+        foreach ($expressions as $expr) {
+            if ($expr['kind'] !== 'variable') {
+                continue;
+            }
+
+            if ((int) $expr['startLine'] !== $lineNumber) {
+                continue;
+            }
+
+            $startCol = (int) $expr['startCol'];
+            $endCol = (int) $expr['endCol'];
+
+            if ($character >= $startCol && $character <= $endCol) {
+                return $expr;
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * @return array<int, BladeLoopScopeInfo>
+     */
+    protected function buildLoopScopes(string $content): array
+    {
+        $allScopes = [];
+        $stack = [];
+
         try {
-            $doc = \Stillat\BladeParser\Document\Document::fromText($content);
-            $loopStack = [];
-
+            $doc = BladeDocument::fromText($content);
             foreach ($doc->getDirectives() as $dir) {
-                $name = $dir->content;
-                $dLine = $dir->position ? $dir->position->startLine : 1;
+                $name = (string) $dir->content;
+                $dStartLine = $dir->position ? $dir->position->startLine - 1 : 0;
+                $dEndLine = $dir->position ? $dir->position->endLine - 1 : $dStartLine;
+                $dStartOffset = $dir->position ? $dir->position->startOffset : 0;
+                $dEndOffset = $dir->position ? $dir->position->endOffset : $dStartOffset;
 
-                if ($name === 'foreach' || $name === 'forelse') {
-                    $loopStack[] = ['startLine' => $dLine];
-                } elseif ($name === 'endforeach' || $name === 'endforelse') {
-                    if (!empty($loopStack)) {
-                        $top = array_pop($loopStack);
-                        if ($targetLine1Indexed >= $top['startLine'] && $targetLine1Indexed <= $dLine) {
-                            return ['startLine' => $top['startLine'], 'endLine' => $dLine];
+                if (in_array($name, ['foreach', 'forelse', 'for', 'while'], true)) {
+                    $scope = new BladeLoopScopeInfo();
+                    $scope->type = $name;
+                    $scope->startLine = $dStartLine;
+                    $scope->startOffset = $dStartOffset;
+                    $scope->declarationOffset = $dStartOffset;
+                    $args = (string) $dir->arguments;
+
+                    if ($name === 'foreach' || $name === 'forelse') {
+                        if (preg_match('/\bas\b/i', $args, $asMatch, PREG_OFFSET_CAPTURE)) {
+                            $asPos = (int) $asMatch[0][1];
+                            $afterAs = substr($args, $asPos);
+                            if (preg_match_all('/\$([a-zA-Z_\x80-\xff][a-zA-Z0-9_\x80-\xff]*)/', $afterAs, $vm)) {
+                                $scope->declaredVariables = array_fill_keys($vm[1], true);
+                            }
+                            $argsStart = $dir->arguments && $dir->arguments->position
+                                ? $dir->arguments->position->startOffset
+                                : $dStartOffset + strlen($name) + 1;
+                            $scope->declarationOffset = $argsStart + $asPos;
                         }
+                    } elseif ($name === 'for') {
+                        $firstClause = explode(';', $args)[0] ?? '';
+                        if (preg_match_all('/\$([a-zA-Z_\x80-\xff][a-zA-Z0-9_\x80-\xff]*)/', $firstClause, $vm)) {
+                            $scope->declaredVariables = array_fill_keys($vm[1], true);
+                        }
+                        $scope->declarationOffset = $dStartOffset;
+                    }
+
+                    if (!empty($stack)) {
+                        $parent = end($stack);
+                        $scope->parent = $parent;
+                        $parent->children[] = $scope;
+                    } else {
+                        $allScopes[] = $scope;
+                    }
+
+                    $stack[] = $scope;
+                } elseif (in_array($name, ['endforeach', 'endforelse', 'endfor', 'endwhile'], true)) {
+                    if (!empty($stack)) {
+                        $top = array_pop($stack);
+                        $top->endLine = $dEndLine;
+                        $top->endOffset = $dEndOffset;
                     }
                 }
             }
         } catch (\Throwable) {}
 
-        return null;
-    }
-
-    protected function byteToUtf16Offset(string $line, int $byteOffset): int
-    {
-        $substr = substr($line, 0, $byteOffset);
-        $utf16 = mb_convert_encoding($substr, 'UTF-16LE', 'UTF-8');
-        return intdiv(strlen($utf16), 2);
+        return $allScopes;
     }
 
     /**
-     * Find variable name and character span at the hovered character position.
-     *
-     * @return array{name: string, start: int, end: int}|null
+     * @param  array<int, BladeLoopScopeInfo>  $scopes
      */
-    protected function findVariableAtPosition(string $line, int $character): ?array
+    protected function findDeclaringScopeForPosition(array $scopes, string $varName, int $offset): ?BladeLoopScopeInfo
     {
-        if (!preg_match_all('/\$([a-zA-Z_\x80-\xff][a-zA-Z0-9_\x80-\xff]*)/', $line, $matches, PREG_OFFSET_CAPTURE)) {
-            return null;
-        }
+        $candidate = null;
 
-        foreach ($matches[1] as $idx => $match) {
-            $varName = $match[0];
-            $dollarOffset = $matches[0][$idx][1];
-            $nameOffset = $matches[1][$idx][1];
-            $endOffset = $nameOffset + strlen($matches[1][$idx][0]);
+        foreach ($scopes as $scope) {
+            if ($offset >= $scope->startOffset && $offset <= $scope->endOffset) {
+                if (isset($scope->declaredVariables[$varName]) && $offset >= $scope->declarationOffset) {
+                    $candidate = $scope;
+                }
 
-            $dollarUtf16 = $this->byteToUtf16Offset($line, $dollarOffset);
-            $endUtf16 = $this->byteToUtf16Offset($line, $endOffset);
-
-            if ($character >= $dollarUtf16 && $character <= $endUtf16) {
-                return [
-                    'name' => $varName,
-                    'start' => $nameOffset,
-                    'end' => $endOffset,
-                ];
+                $childCandidate = $this->findDeclaringScopeForPosition($scope->children, $varName, $offset);
+                if ($childCandidate !== null) {
+                    $candidate = $childCandidate;
+                }
             }
         }
 
-        return null;
+        return $candidate;
+    }
+
+    /**
+     * @param  array<int, BladeLoopScopeInfo>  $scopes
+     * @param  array<int, array{start: int, end: int}>  $excluded
+     */
+    protected function collectShadowExclusions(array $scopes, string $varName, array &$excluded): void
+    {
+        foreach ($scopes as $scope) {
+            if (isset($scope->declaredVariables[$varName])) {
+                $excluded[] = [
+                    'start' => $scope->declarationOffset,
+                    'end' => $scope->endOffset,
+                ];
+            } else {
+                $this->collectShadowExclusions($scope->children, $varName, $excluded);
+            }
+        }
+    }
+
+    /**
+     * @param  array<int, array{start: int, end: int}>  $excludedRanges
+     */
+    protected function isOffsetExcluded(int $offset, array $excludedRanges): bool
+    {
+        foreach ($excludedRanges as $range) {
+            if ($offset >= $range['start'] && $offset <= $range['end']) {
+                return true;
+            }
+        }
+
+        return false;
     }
 }
