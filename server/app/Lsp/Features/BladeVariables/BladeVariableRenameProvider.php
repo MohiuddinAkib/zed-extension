@@ -6,9 +6,14 @@ namespace App\Lsp\Features\BladeVariables;
 
 use App\Lsp\Analysis\BladePhpAstAnalyzer;
 use App\Lsp\Analysis\BladeScopeResolver;
+use App\Lsp\Analysis\PhpViewVariableRenameAnalyzer;
 use App\Lsp\Document;
+use App\Lsp\DocumentManager;
 use App\Lsp\Project;
+use App\Lsp\Support\FileUri;
 use Stillat\BladeParser\Document\Document as BladeDocument;
+use Symfony\Component\Finder\Finder;
+use Throwable;
 
 class BladeVariableRenameProvider
 {
@@ -22,12 +27,14 @@ class BladeVariableRenameProvider
 
     protected BladePhpAstAnalyzer $astAnalyzer;
     protected BladeScopeResolver $scopeResolver;
+    protected PhpViewVariableRenameAnalyzer $phpAnalyzer;
 
     public function __construct(
         protected Project $project,
     ) {
         $this->astAnalyzer = new BladePhpAstAnalyzer();
         $this->scopeResolver = new BladeScopeResolver($this->project);
+        $this->phpAnalyzer = new PhpViewVariableRenameAnalyzer();
     }
 
     /**
@@ -38,10 +45,6 @@ class BladeVariableRenameProvider
      */
     public function prepareRename(Document $document, array $position): ?array
     {
-        if (!str_ends_with($document->uri, '.blade.php')) {
-            return null;
-        }
-
         $lineNumber = $position['line'] ?? null;
         $character = $position['character'] ?? null;
 
@@ -49,6 +52,19 @@ class BladeVariableRenameProvider
             return null;
         }
 
+        if (str_ends_with($document->uri, '.blade.php')) {
+            return $this->prepareRenameInBlade($document, $lineNumber, $character);
+        }
+
+        if (str_ends_with($document->uri, '.php')) {
+            return $this->prepareRenameInPhp($document, $lineNumber, $character);
+        }
+
+        return null;
+    }
+
+    protected function prepareRenameInBlade(Document $document, int $lineNumber, int $character): ?array
+    {
         $expressions = $this->astAnalyzer->extractAllExpressions($document->content);
         $targetExpr = $this->findVariableExpressionAtPosition($expressions, $lineNumber, $character);
 
@@ -73,6 +89,24 @@ class BladeVariableRenameProvider
         ];
     }
 
+    protected function prepareRenameInPhp(Document $document, int $lineNumber, int $character): ?array
+    {
+        $target = $this->phpAnalyzer->findTargetAtPosition($document->content, $lineNumber, $character);
+        if ($target === null) {
+            return null;
+        }
+
+        $varName = $target['name'];
+        if (in_array($varName, self::RESERVED_VARIABLES, true)) {
+            return null;
+        }
+
+        return [
+            'range' => $target['range'],
+            'placeholder' => $varName,
+        ];
+    }
+
     /**
      * Perform the rename and return workspace edits.
      *
@@ -82,26 +116,10 @@ class BladeVariableRenameProvider
      */
     public function rename(Document $document, array $position, string $newName): ?array
     {
-        if (!str_ends_with($document->uri, '.blade.php')) {
-            return null;
-        }
-
         $lineNumber = $position['line'] ?? null;
         $character = $position['character'] ?? null;
 
         if (!is_int($lineNumber) || !is_int($character)) {
-            return null;
-        }
-
-        $expressions = $this->astAnalyzer->extractAllExpressions($document->content);
-        $targetExpr = $this->findVariableExpressionAtPosition($expressions, $lineNumber, $character);
-
-        if ($targetExpr === null) {
-            return null;
-        }
-
-        $targetVarName = $targetExpr['name'];
-        if (in_array($targetVarName, self::RESERVED_VARIABLES, true)) {
             return null;
         }
 
@@ -114,11 +132,256 @@ class BladeVariableRenameProvider
             return null;
         }
 
+        if (str_ends_with($document->uri, '.blade.php')) {
+            return $this->renameFromBlade($document, $lineNumber, $character, $cleanNewName);
+        }
+
+        if (str_ends_with($document->uri, '.php')) {
+            return $this->renameFromPhp($document, $lineNumber, $character, $cleanNewName);
+        }
+
+        return null;
+    }
+
+    protected function renameFromBlade(Document $document, int $lineNumber, int $character, string $cleanNewName): ?array
+    {
+        $expressions = $this->astAnalyzer->extractAllExpressions($document->content);
+        $targetExpr = $this->findVariableExpressionAtPosition($expressions, $lineNumber, $character);
+
+        if ($targetExpr === null) {
+            return null;
+        }
+
+        $targetVarName = $targetExpr['name'];
+        if (in_array($targetVarName, self::RESERVED_VARIABLES, true)) {
+            return null;
+        }
+
         // Build directive scope hierarchy
         $scopes = $this->buildLoopScopes($document->content);
-
-        // Find the declaring loop scope for this target variable at cursor position
         $declaringScope = $this->findDeclaringScopeForPosition($scopes, $targetVarName, (int) $targetExpr['startOffset']);
+
+        $bladeEdits = $this->generateEditsForBladeDocument($document, $targetVarName, $cleanNewName, $declaringScope);
+        if (empty($bladeEdits)) {
+            return null;
+        }
+
+        $changes = [
+            $document->uri => $bladeEdits,
+        ];
+
+        // If this variable is at template scope (not inside a local loop scope), find originating PHP sources
+        if ($declaringScope === null) {
+            $viewKey = $this->scopeResolver->resolveViewKey($document->uri);
+            $this->addPhpSourceEditsForView($changes, $viewKey, $targetVarName, $cleanNewName);
+        }
+
+        return ['changes' => $changes];
+    }
+
+    protected function renameFromPhp(Document $document, int $lineNumber, int $character, string $cleanNewName): ?array
+    {
+        $target = $this->phpAnalyzer->findTargetAtPosition($document->content, $lineNumber, $character);
+        if ($target === null) {
+            return null;
+        }
+
+        $targetVarName = $target['name'];
+        if (in_array($targetVarName, self::RESERVED_VARIABLES, true)) {
+            return null;
+        }
+
+        $targetViews = $target['viewNames'];
+        $changes = [];
+
+        // 1. Rename occurrences in the current PHP document
+        $thisDocEdits = $this->phpAnalyzer->findEditsForViewVariable($document->content, $targetVarName, $targetViews, $cleanNewName);
+        if (!empty($thisDocEdits)) {
+            $changes[$document->uri] = $thisDocEdits;
+        }
+
+        // 2. Find and update all associated Blade templates
+        $this->addBladeTemplateEditsForViews($changes, $targetViews, $targetVarName, $cleanNewName);
+
+        if (empty($changes)) {
+            return null;
+        }
+
+        return ['changes' => $changes];
+    }
+
+    /**
+     * Add text edits from PHP files providing data to the given view key.
+     *
+     * @param  array<string, array<int, mixed>>  $changes
+     */
+    protected function addPhpSourceEditsForView(array &$changes, string $viewKey, string $targetVarName, string $cleanNewName): void
+    {
+        $sourcesToScan = [];
+
+        try {
+            $viewVariables = $this->project->index->viewVariables();
+
+            // 1. Sources explicitly registered for matching view keys
+            foreach ($viewVariables['views'] ?? [] as $indexedKey => $viewData) {
+                if (is_array($viewData) && $this->scopeResolver->matchesViewKey((string) $indexedKey, $viewKey)) {
+                    foreach ($viewData['sources'] ?? [] as $src) {
+                        $sourcesToScan[$src] = true;
+                    }
+                }
+            }
+
+            // 2. Global share / wildcard sources
+            if (isset($viewVariables['views']['*']['sources'])) {
+                foreach ($viewVariables['views']['*']['sources'] as $src) {
+                    $sourcesToScan[$src] = true;
+                }
+            }
+
+            foreach ($viewVariables['globals'] ?? [] as $globalVar) {
+                if (isset($globalVar['source']) && !empty($globalVar['source'])) {
+                    $sourcesToScan[$globalVar['source']] = true;
+                }
+            }
+        } catch (Throwable) {}
+
+        // 3. Fallback: scan controller and provider directories if no sources found in index
+        if (empty($sourcesToScan)) {
+            $basePath = $this->project->path();
+            $searchDirs = [
+                $basePath . '/app/Http/Controllers',
+                $basePath . '/routes',
+                $basePath . '/app/Providers',
+                $basePath . '/app/View',
+                $basePath . '/app/Mail',
+                $basePath . '/app/Livewire',
+            ];
+            foreach ($searchDirs as $dir) {
+                if (!is_dir($dir)) {
+                    continue;
+                }
+                try {
+                    $files = Finder::create()->files()->name('*.php')->in($dir);
+                    foreach ($files as $file) {
+                        $sourcesToScan[$file->getRealPath()] = true;
+                    }
+                } catch (Throwable) {}
+            }
+        }
+
+        foreach (array_keys($sourcesToScan) as $srcPath) {
+            $absPath = $this->resolveAbsolutePath((string) $srcPath);
+            if (!file_exists($absPath)) {
+                continue;
+            }
+
+            $content = $this->getFileContent($absPath);
+            if ($content === '') {
+                continue;
+            }
+
+            if (!str_contains($content, $targetVarName)) {
+                continue;
+            }
+
+            $edits = $this->phpAnalyzer->findEditsForViewVariable($content, $targetVarName, $viewKey, $cleanNewName);
+            if (!empty($edits)) {
+                $uri = (string) FileUri::fromPath($absPath);
+                $changes[$uri] = $edits;
+            }
+        }
+    }
+
+    /**
+     * Add text edits for Blade templates matching target view keys.
+     *
+     * @param  array<string, array<int, mixed>>  $changes
+     * @param  array<int, string>  $targetViews
+     */
+    protected function addBladeTemplateEditsForViews(array &$changes, array $targetViews, string $targetVarName, string $cleanNewName): void
+    {
+        $matchedBladePaths = [];
+
+        try {
+            $views = $this->project->index->views();
+            foreach ($views as $view) {
+                $vKey = (string) ($view['key'] ?? '');
+                $vPath = (string) ($view['path'] ?? '');
+
+                if ($vKey === '' || $vPath === '') {
+                    continue;
+                }
+
+                $matches = in_array('*', $targetViews, true);
+                if (!$matches) {
+                    foreach ($targetViews as $tView) {
+                        if ($this->scopeResolver->matchesViewKey($tView, $vKey)) {
+                            $matches = true;
+                            break;
+                        }
+                    }
+                }
+
+                if ($matches) {
+                    $matchedBladePaths[$vPath] = true;
+                }
+            }
+        } catch (Throwable) {}
+
+        // Fallback: resolve path directly for explicit view keys
+        if (empty($matchedBladePaths)) {
+            $basePath = rtrim($this->project->path(), '/\\');
+            foreach ($targetViews as $tView) {
+                if ($tView === '*' || str_contains($tView, '*')) {
+                    continue;
+                }
+
+                $relPath = 'resources/views/' . str_replace('.', '/', $tView) . '.blade.php';
+                $absPath = "{$basePath}/{$relPath}";
+                if (file_exists($absPath)) {
+                    $matchedBladePaths[$relPath] = true;
+                }
+            }
+        }
+
+        foreach (array_keys($matchedBladePaths) as $bPath) {
+            $absPath = $this->resolveAbsolutePath((string) $bPath);
+            if (!file_exists($absPath)) {
+                continue;
+            }
+
+            $content = $this->getFileContent($absPath);
+            if ($content === '') {
+                continue;
+            }
+
+            if (!str_contains($content, '$' . $targetVarName)) {
+                continue;
+            }
+
+            $uri = (string) FileUri::fromPath($absPath);
+            $bladeDoc = new Document($uri, $content);
+            $bladeEdits = $this->generateEditsForBladeDocument($bladeDoc, $targetVarName, $cleanNewName, null);
+
+            if (!empty($bladeEdits)) {
+                $changes[$uri] = $bladeEdits;
+            }
+        }
+    }
+
+    /**
+     * Generate text edits for a Blade document.
+     *
+     * @return array<int, array{range: array{start: array{line: int, character: int}, end: array{line: int, character: int}}, newText: string}>
+     */
+    public function generateEditsForBladeDocument(
+        Document $document,
+        string $targetVarName,
+        string $cleanNewName,
+        ?BladeLoopScopeInfo $declaringScope
+    ): array {
+        $expressions = $this->astAnalyzer->extractAllExpressions($document->content);
+        $scopes = $this->buildLoopScopes($document->content);
 
         $minLine = 0;
         $maxLine = PHP_INT_MAX;
@@ -128,7 +391,6 @@ class BladeVariableRenameProvider
             $minLine = $declaringScope->startLine;
             $maxLine = $declaringScope->endLine;
 
-            // Expressions on declaringScope->startLine before its declaration offset belong to outer scope
             if ($declaringScope->declarationOffset > $declaringScope->startOffset) {
                 $excludedOffsetRanges[] = [
                     'start' => $declaringScope->startOffset,
@@ -136,10 +398,8 @@ class BladeVariableRenameProvider
                 ];
             }
 
-            // Exclude child scopes that shadow this variable
             $this->collectShadowExclusions($declaringScope->children, $targetVarName, $excludedOffsetRanges);
         } else {
-            // Template level: exclude all loop scopes declaring $targetVarName
             $this->collectShadowExclusions($scopes, $targetVarName, $excludedOffsetRanges);
         }
 
@@ -157,8 +417,6 @@ class BladeVariableRenameProvider
             }
 
             $startOffset = (int) $expr['startOffset'];
-
-            // Check if this expression falls in any excluded/shadowed offset range
             if ($this->isOffsetExcluded($startOffset, $excludedOffsetRanges)) {
                 continue;
             }
@@ -179,11 +437,6 @@ class BladeVariableRenameProvider
             }
         }
 
-        if (empty($edits)) {
-            return null;
-        }
-
-        // Sort edits in document order (line asc, character asc)
         usort($edits, function (array $a, array $b): int {
             $lineCmp = ($a['range']['start']['line'] ?? 0) <=> ($b['range']['start']['line'] ?? 0);
             if ($lineCmp !== 0) {
@@ -193,11 +446,7 @@ class BladeVariableRenameProvider
             return ($a['range']['start']['character'] ?? 0) <=> ($b['range']['start']['character'] ?? 0);
         });
 
-        return [
-            'changes' => [
-                $document->uri => $edits,
-            ],
-        ];
+        return $edits;
     }
 
     /**
@@ -290,7 +539,7 @@ class BladeVariableRenameProvider
                     }
                 }
             }
-        } catch (\Throwable) {}
+        } catch (Throwable) {}
 
         return $allScopes;
     }
@@ -348,5 +597,31 @@ class BladeVariableRenameProvider
         }
 
         return false;
+    }
+
+    protected function resolveAbsolutePath(string $path): string
+    {
+        if (str_starts_with($path, '/') || preg_match('/^[a-zA-Z]:[\\\\\/]/', $path)) {
+            return $path;
+        }
+
+        $basePath = rtrim($this->project->path(), '/\\');
+        return "{$basePath}/" . ltrim($path, '/\\');
+    }
+
+    protected function getFileContent(string $absPath): string
+    {
+        $uri = FileUri::fromPath($absPath)->toString();
+        try {
+            if (isset($this->project->container)) {
+                $docManager = $this->project->container->make(DocumentManager::class);
+                $openDoc = $docManager->get($uri);
+                if ($openDoc !== null) {
+                    return $openDoc->content;
+                }
+            }
+        } catch (Throwable) {}
+
+        return (string) @file_get_contents($absPath);
     }
 }
