@@ -83,6 +83,14 @@ class FileUri implements JsonSerializable
     }
 
     /**
+     * Convert the URI to a string (explicit alias for __toString).
+     */
+    public function toString(): string
+    {
+        return $this->uri;
+    }
+
+    /**
      * Convert the URI to a JSON-serializable string.
      */
     public function jsonSerialize(): string

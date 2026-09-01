@@ -78,6 +78,14 @@ class JsonRpcResponse
     }
 
     /**
+     * Allow property-style access to response fields (e.g. ->result, ->error, ->id).
+     */
+    public function __get(string $name): mixed
+    {
+        return $this->content[$name] ?? null;
+    }
+
+    /**
      * Get the response as a JSON string.
      */
     public function toJson(int $options = 0): string
