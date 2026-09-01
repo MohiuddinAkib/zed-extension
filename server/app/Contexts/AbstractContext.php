@@ -39,12 +39,23 @@ abstract class AbstractContext
         $this->freshObject = $this->freshArray();
     }
 
-    public function flip()
+    public function flip(array &$visited = []): array
     {
-        return array_merge(
-            Arr::except($this->toArray(), ['children']),
-            ['parent' => $this->parent?->flip()],
-        );
+        $oid = spl_object_id($this);
+        if (isset($visited[$oid])) {
+            return [];
+        }
+        $visited[$oid] = true;
+
+        $data = Arr::except($this->toShallowArray(), ['children']);
+
+        if ($this->parent !== null && !isset($visited[spl_object_id($this->parent)])) {
+            $data['parent'] = $this->parent->flip($visited);
+        } else {
+            $data['parent'] = null;
+        }
+
+        return $data;
     }
 
     public function findAutocompleting(?AbstractContext $context = null)
@@ -86,9 +97,9 @@ abstract class AbstractContext
         return null;
     }
 
-    protected function freshArray()
+    protected function freshArray(): array
     {
-        return $this->toArray();
+        return $this->toShallowArray();
     }
 
     public function initNew(AbstractContext $newContext)
@@ -159,7 +170,7 @@ abstract class AbstractContext
 
     public function pristine(): bool
     {
-        return $this->freshObject === $this->freshArray();
+        return empty($this->freshObject) || $this->freshObject === $this->freshArray();
     }
 
     public function touched(): bool
@@ -167,7 +178,7 @@ abstract class AbstractContext
         return !$this->pristine();
     }
 
-    public function toArray(): array
+    public function toShallowArray(): array
     {
         return array_merge(
             ['type' => $this->type()],
@@ -176,10 +187,18 @@ abstract class AbstractContext
             ($this->label !== '') ? ['label' => $this->label] : [],
             (count($this->start) > 0) ? ['start' => $this->start] : [],
             (count($this->end) > 0) ? ['end' => $this->end] : [],
-            ($this->hasChildren)
-                ? ['children' => array_map(fn ($child) => $child->toArray(), $this->children)]
-                : [],
         );
+    }
+
+    public function toArray(): array
+    {
+        $result = $this->toShallowArray();
+
+        if ($this->hasChildren) {
+            $result['children'] = array_map(fn ($child) => $child->toArray(), $this->children);
+        }
+
+        return $result;
     }
 
     public function toJson($flags = 0)
