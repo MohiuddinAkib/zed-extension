@@ -63,6 +63,14 @@ final class Project
     }
 
     /**
+     * Get a path relative to this project.
+     */
+    public function relativePath(string $path): string
+    {
+        return $this->uri->relativePath($path);
+    }
+
+    /**
      * Create a document link response for a workspace-relative path.
      *
      * @param  array<string, array<string, int>>  $range

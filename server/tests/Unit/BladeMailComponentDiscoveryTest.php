@@ -397,3 +397,91 @@ test('missing vendor paths do not crash or prevent local component discovery', f
     @rmdir($tempDir);
 });
 
+test('mail component tags produce clickable document links pointing to their view files', function () {
+    $tempDir = sys_get_temp_dir() . '/mail_links_' . uniqid();
+    @mkdir($tempDir . '/vendor/laravel/framework/src/Illuminate/Mail/resources/views/html', 0777, true);
+    @mkdir($tempDir . '/resources/views', 0777, true);
+
+    $buttonBlade = $tempDir . '/vendor/laravel/framework/src/Illuminate/Mail/resources/views/html/button.blade.php';
+    file_put_contents($buttonBlade, "@props(['url' => '#', 'color' => 'primary'])\n<a href=\"{{ \$url }}\">{{ \$slot }}</a>");
+
+    $project = createMailComponentTestProject($tempDir, []);
+
+    $mapper = new BladeComponentDocumentMapper($project);
+    $blade = "<x-mail::button url=\"https://example.com\">Click</x-mail::button>";
+    $doc = new Document('file://' . $tempDir . '/resources/views/mail.blade.php', $blade);
+
+    $links = $mapper->links($doc);
+
+    // At least one link pointing to the button blade file
+    $buttonLinks = array_values(array_filter($links, fn ($l) => str_contains((string) ($l['target'] ?? ''), 'button.blade.php')));
+    expect($buttonLinks)->not->toBeEmpty();
+    expect((string) $buttonLinks[0]['target'])->toContain('button.blade.php');
+
+    // Also verify Go to Definition resolves the component file
+    $docManager = new DocumentManager();
+    $docManager->open($doc->uri, $doc->content);
+    $container = new Container();
+    $container->instance(Project::class, $project);
+    $container->instance(DocumentManager::class, $docManager);
+    $featureRegistry = new FeatureRegistry($container);
+    $defHandler = new \App\Lsp\Methods\TextDocumentDefinition($docManager, $featureRegistry, $project);
+    $defReq = new JsonRpcRequest(1, 'textDocument/definition', [
+        'textDocument' => ['uri' => $doc->uri],
+        'position'     => ['line' => 0, 'character' => 5], // on 'mail::button'
+    ]);
+    $defRes = $defHandler->handle($defReq);
+    expect($defRes->result)->not->toBeEmpty();
+    expect($defRes->result[0]['targetUri'])->toContain('button.blade.php');
+
+    // Also verify hover displays relative path in markdown link
+    $hover = $mapper->hover($doc, ['line' => 0, 'character' => 5]);
+    expect($hover)->not->toBeNull();
+    expect($hover['contents']['value'])->toContain('Laravel mail component: <x-mail::button>');
+    expect($hover['contents']['value'])->toContain('[vendor/laravel/framework/src/Illuminate/Mail/resources/views/html/button.blade.php]');
+
+    @unlink($buttonBlade);
+    @rmdir($tempDir . '/vendor/laravel/framework/src/Illuminate/Mail/resources/views/html');
+    @rmdir($tempDir . '/resources/views');
+    @rmdir($tempDir);
+});
+
+test('published mail views override vendor defaults for document links and definitions', function () {
+    $tempDir = sys_get_temp_dir() . '/mail_published_' . uniqid();
+    @mkdir($tempDir . '/vendor/laravel/framework/src/Illuminate/Mail/resources/views/html', 0777, true);
+    @mkdir($tempDir . '/resources/views/vendor/mail/html', 0777, true);
+
+    // Vendor default
+    $vendorBlade = $tempDir . '/vendor/laravel/framework/src/Illuminate/Mail/resources/views/html/button.blade.php';
+    file_put_contents($vendorBlade, "@props(['url' => '#'])\n<a href=\"{{ \$url }}\">{{ \$slot }}</a>");
+
+    // Published override (higher priority)
+    $publishedBlade = $tempDir . '/resources/views/vendor/mail/html/button.blade.php';
+    file_put_contents($publishedBlade, "@props(['url' => '#', 'color' => 'primary'])\n<a href=\"{{ \$url }}\" class=\"{{ \$color }}\">{{ \$slot }}</a>");
+
+    $project = createMailComponentTestProject($tempDir, []);
+    $registry = new ComponentRegistry($project);
+    $symbol = $registry->getComponent('mail::button');
+
+    expect($symbol)->not->toBeNull();
+    // Published path should win
+    expect($symbol->viewPath)->toBe($publishedBlade);
+
+    // Verify document link points to published path
+    $mapper = new BladeComponentDocumentMapper($project, $registry);
+    $blade = "<x-mail::button url=\"https://example.com\">Click</x-mail::button>";
+    $doc = new Document('file://' . $tempDir . '/resources/views/mail.blade.php', $blade);
+    $links = $mapper->links($doc);
+
+    $buttonLinks = array_values(array_filter($links, fn ($l) => str_contains((string) ($l['target'] ?? ''), 'resources/views/vendor/mail/html/button.blade.php')));
+    expect($buttonLinks)->not->toBeEmpty();
+
+    @unlink($vendorBlade);
+    @unlink($publishedBlade);
+    @rmdir($tempDir . '/vendor/laravel/framework/src/Illuminate/Mail/resources/views/html');
+    @rmdir($tempDir . '/resources/views/vendor/mail/html');
+    @rmdir($tempDir . '/resources/views/vendor/mail');
+    @rmdir($tempDir . '/resources/views/vendor');
+    @rmdir($tempDir . '/resources/views');
+    @rmdir($tempDir);
+});

@@ -37,8 +37,15 @@ class BladeComponentDocumentMapper
     {
         return collect($this->matches($document))
             ->map(function (array $match): ?array {
+                // 1. Try the project index first (covers most indexed vendor packages)
                 $component = $this->component($match['name']);
                 $path = $this->path($component);
+
+                // 2. Fall back to ComponentRegistry (covers mail, livewire, anonymous components)
+                if ($path === null) {
+                    $symbol = $this->componentRegistry->getComponent($match['name']);
+                    $path = $symbol?->viewPath;
+                }
 
                 return $path ? $this->project->link($match['range'], $path) : null;
             })
@@ -313,10 +320,10 @@ class BladeComponentDocumentMapper
         $matches = [];
         $prefixes = $this->project->index->bladeComponents()['prefixes'] ?? [];
         $prefixPattern = collect($prefixes)->filter()->map(fn (string $prefix): string => preg_quote($prefix, '/'))->implode('|');
-        $patterns = ['/<\/?x-([^\s>]+)/'];
+        $patterns = ['/<\/?x-([^\s\/>]+)/'];
 
         if ($prefixPattern !== '') {
-            $patterns[] = '/<\/?((' . $prefixPattern . ')\:[^\s>]+)/';
+            $patterns[] = '/<\/?((' . $prefixPattern . ')\:[^\s\/>]+)/';
         }
 
         foreach (explode("\n", $document->content) as $lineNumber => $line) {
@@ -464,7 +471,9 @@ class BladeComponentDocumentMapper
      */
     protected function markdownPath(string $path): string
     {
-        return "[{$path}]({$this->project->target($path)})";
+        $displayPath = $this->project->relativePath($path);
+
+        return "[{$displayPath}]({$this->project->target($path)})";
     }
 
     /**

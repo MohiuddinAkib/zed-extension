@@ -323,6 +323,8 @@ class ComponentRegistry
     protected function discoverMailMarkdownComponents(): void
     {
         $basePath = rtrim($this->project->path(), '/\\');
+
+        // Ordered lowest → highest priority. Published path is last so it overwrites the vendor default.
         $candidates = [
             $basePath . '/vendor/laravel/framework/src/Illuminate/Mail/resources/views/html',
             $basePath . '/resources/views/vendor/mail/html',
@@ -362,13 +364,12 @@ class ComponentRegistry
                     documentation: "Laravel mail component: <x-{$componentKey}>",
                 );
 
+                // Register under all key variants; later iterations (published path) override earlier ones
                 $this->components[$componentKey] = $symbol;
                 $this->components['x-' . $componentKey] = $symbol;
                 $this->components[$kebabKey] = $symbol;
                 $this->components['x-' . $kebabKey] = $symbol;
             }
-
-            return;
         }
     }
 

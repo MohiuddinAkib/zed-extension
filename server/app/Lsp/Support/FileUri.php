@@ -48,7 +48,13 @@ class FileUri implements JsonSerializable
      */
     public function target(string $path, ?int $line = null): self
     {
-        $target = $this->joinPaths($path);
+        if (str_starts_with($path, 'file://')) {
+            $target = new self($path);
+        } elseif (str_starts_with($path, '/') || preg_match('#^[A-Za-z]:[\\/]#', $path) === 1) {
+            $target = self::fromPath($path);
+        } else {
+            $target = $this->joinPaths($path);
+        }
 
         return $line === null
             ? $target
@@ -60,18 +66,24 @@ class FileUri implements JsonSerializable
      */
     public function relativePath(string $path): string
     {
-        $basePath = rtrim(self::normalizePath($this->path()), '/');
-        $normalized = self::normalizePath(realpath($path) ?: $path);
+        $rawBasePath = rtrim(self::normalizePath($this->path()), '/');
+        $realBasePath = rtrim(self::normalizePath(realpath($this->path()) ?: $this->path()), '/');
+        $rawNormalized = self::normalizePath($path);
+        $realNormalized = self::normalizePath(realpath($path) ?: $path);
 
-        if ($normalized === $basePath) {
+        if ($rawNormalized === $rawBasePath || $realNormalized === $realBasePath) {
             return '';
         }
 
-        if ($basePath === '' || !str_starts_with($normalized, $basePath.'/')) {
-            return $path;
+        if ($rawBasePath !== '' && str_starts_with($rawNormalized, $rawBasePath.'/')) {
+            return substr($rawNormalized, strlen($rawBasePath) + 1);
         }
 
-        return substr($normalized, strlen($basePath) + 1);
+        if ($realBasePath !== '' && str_starts_with($realNormalized, $realBasePath.'/')) {
+            return substr($realNormalized, strlen($realBasePath) + 1);
+        }
+
+        return $path;
     }
 
     /**
