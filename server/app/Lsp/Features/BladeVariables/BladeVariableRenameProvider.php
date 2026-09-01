@@ -21,6 +21,14 @@ class BladeVariableRenameProvider
         $this->scopeResolver = new BladeScopeResolver($this->project);
     }
 
+    public const RESERVED_VARIABLES = [
+        'loop',
+        'errors',
+        '__env',
+        'this',
+        'app',
+    ];
+
     /**
      * Prepare rename for the given document and position.
      *
@@ -40,22 +48,45 @@ class BladeVariableRenameProvider
             return null;
         }
 
-        $line = explode("\n", $document->content)[$lineNumber] ?? '';
-        $varInfo = $this->findVariableAtPosition($line, $character);
+        $expressions = $this->astAnalyzer->extractAllExpressions($document->content);
 
-        if ($varInfo === null) {
+        $targetExpr = null;
+        foreach ($expressions as $expr) {
+            if ($expr['kind'] !== 'variable') {
+                continue;
+            }
+
+            if ((int) $expr['startLine'] !== $lineNumber) {
+                continue;
+            }
+
+            $startCol = (int) $expr['startCol'];
+            $endCol = (int) $expr['endCol'];
+
+            if ($character >= $startCol && $character <= $endCol) {
+                $targetExpr = $expr;
+                break;
+            }
+        }
+
+        if ($targetExpr === null) {
             return null;
         }
 
-        $startUtf16 = $this->byteToUtf16Offset($line, $varInfo['start']);
-        $endUtf16 = $this->byteToUtf16Offset($line, $varInfo['end']);
+        $varName = $targetExpr['name'];
+        if (in_array($varName, self::RESERVED_VARIABLES, true)) {
+            return null;
+        }
+
+        $varStartCol = (int) $targetExpr['startCol'] + 1;
+        $varEndCol = (int) $targetExpr['endCol'];
 
         return [
             'range' => [
-                'start' => ['line' => $lineNumber, 'character' => $startUtf16],
-                'end' => ['line' => $lineNumber, 'character' => $endUtf16],
+                'start' => ['line' => $lineNumber, 'character' => $varStartCol],
+                'end' => ['line' => $lineNumber, 'character' => $varEndCol],
             ],
-            'placeholder' => $varInfo['name'],
+            'placeholder' => $varName,
         ];
     }
 

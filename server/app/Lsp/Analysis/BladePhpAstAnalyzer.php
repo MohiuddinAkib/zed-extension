@@ -91,11 +91,21 @@ class BladePhpAstAnalyzer
                         : $directive->position->startOffset + strlen((string) $directive->content) + 2;
                     $startByte = strlen(mb_substr($content, 0, $startChar));
                     $isGuarded = in_array((string) $directive->content, ['isset', 'empty'], true);
-                    $snippets[] = [
-                        'code' => $args,
-                        'offset' => $startByte,
-                        'isGuarded' => $isGuarded,
-                    ];
+                    $dirName = (string) $directive->content;
+
+                    if ($dirName === 'foreach' || $dirName === 'forelse') {
+                        $snippets[] = [
+                            'code' => 'foreach(' . $args . ') {}',
+                            'offset' => $startByte - 8,
+                            'isGuarded' => $isGuarded,
+                        ];
+                    } else {
+                        $snippets[] = [
+                            'code' => $args,
+                            'offset' => $startByte,
+                            'isGuarded' => $isGuarded,
+                        ];
+                    }
                 }
             }
 
