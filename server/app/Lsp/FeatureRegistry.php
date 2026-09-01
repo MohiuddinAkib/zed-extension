@@ -30,6 +30,8 @@ use App\Lsp\Features\Auth\AuthDiagnosticProvider;
 use App\Lsp\Features\Auth\AuthHoverProvider;
 use App\Lsp\Features\Auth\AuthLinkProvider;
 use App\Lsp\Features\Attributes\AttributeCompletionProvider;
+use App\Lsp\Features\Attributes\AttributeHoverProvider;
+use App\Lsp\Features\Attributes\AttributeLinkProvider;
 use App\Lsp\Features\BladeComponents\BladeComponentCompletionProvider;
 use App\Lsp\Features\BladeComponents\BladeComponentHoverProvider;
 use App\Lsp\Features\BladeComponents\BladeComponentLinkProvider;
@@ -111,6 +113,7 @@ class FeatureRegistry
      */
     public array $links = [
         AppBindingLinkProvider::class,
+        AttributeLinkProvider::class,
         AssetLinkProvider::class,
         AuthLinkProvider::class,
         BladeComponentLinkProvider::class,
@@ -149,6 +152,7 @@ class FeatureRegistry
         RouteHoverProvider::class,
         TranslationHoverProvider::class,
         ViewHoverProvider::class,
+        AttributeHoverProvider::class,
         BladeVariableHoverProvider::class,
         BladeMemberHoverProvider::class,
         BladeDirectiveHoverProvider::class,

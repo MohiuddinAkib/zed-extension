@@ -88,13 +88,13 @@ class AttributeCompletionProvider implements CompletionProvider
         // 2. Facade / Static method driver context:
         // Auth::guard('prefix or Storage::disk('prefix or DB::connection('prefix or Cache::store('prefix
         // Queue::connection('prefix or Mail::mailer('prefix or Broadcast::connection('prefix or Redis::connection('prefix
-        if (preg_match('/(?:\\\\?[a-zA-Z0-9_\\\\]*\\\\)?(Auth|Storage|DB|Database|Cache|Queue|Mail|Broadcast|Redis|Route|Gate)::([a-zA-Z0-9_]+)\s*\(\s*([\'"]?)([^\'")]*)$/', $textBefore, $fm)) {
+        if (preg_match('/(?:\\\\?[a-zA-Z0-9_\\\\]*\\\\)?(Auth|Storage|DB|Database|Cache|Queue|Mail|Broadcast|Redis|Log|Route|Gate)::([a-zA-Z0-9_]+)\s*\(\s*([\'"]?)([^\'")]*)$/', $textBefore, $fm)) {
             $facade = $fm[1];
             $method = $fm[2];
             $quoteChar = $fm[3];
             $prefix = $fm[4];
 
-            $domain = $this->resolveFacadeMethodDomain($facade, $method);
+            $domain = $this->attrRegistry->getFacadeMethodArgumentDomain($facade, $method);
             if ($domain !== null) {
                 return [
                     'domain'    => $domain,
@@ -111,13 +111,7 @@ class AttributeCompletionProvider implements CompletionProvider
             $quoteChar = $hm[2];
             $prefix = $hm[3];
 
-            $domain = match ($helper) {
-                'auth' => 'driver:auth_guards',
-                'cache' => 'driver:cache_stores',
-                'storage' => 'driver:filesystem_disks',
-                'db' => 'driver:database_connections',
-                default => null,
-            };
+            $domain = $this->attrRegistry->getHelperArgumentDomain($helper);
 
             if ($domain !== null) {
                 return [
@@ -129,54 +123,6 @@ class AttributeCompletionProvider implements CompletionProvider
         }
 
         return null;
-    }
-
-    protected function resolveFacadeMethodDomain(string $facade, string $method): ?string
-    {
-        return match ($facade) {
-            'Auth' => match ($method) {
-                'guard' => 'driver:auth_guards',
-                'user' => 'driver:auth_guards',
-                default => null,
-            },
-            'Storage' => match ($method) {
-                'disk', 'fake', 'persistentFake', 'forgetDisk' => 'driver:filesystem_disks',
-                default => null,
-            },
-            'DB', 'Database' => match ($method) {
-                'connection' => 'driver:database_connections',
-                default => null,
-            },
-            'Cache' => match ($method) {
-                'store', 'driver' => 'driver:cache_stores',
-                default => null,
-            },
-            'Queue' => match ($method) {
-                'connection' => 'driver:queue_connections',
-                default => null,
-            },
-            'Mail' => match ($method) {
-                'mailer' => 'driver:mailers',
-                default => null,
-            },
-            'Broadcast' => match ($method) {
-                'connection' => 'driver:broadcasters',
-                default => null,
-            },
-            'Redis' => match ($method) {
-                'connection' => 'driver:redis_connections',
-                default => null,
-            },
-            'Route' => match ($method) {
-                'middleware' => 'middleware',
-                default => null,
-            },
-            'Gate' => match ($method) {
-                'allows', 'denies', 'check', 'authorize', 'inspect' => 'policies',
-                default => null,
-            },
-            default => null,
-        };
     }
 
     /**
@@ -205,17 +151,41 @@ class AttributeCompletionProvider implements CompletionProvider
 
                 $configured = $info['configuredDriver'] ?? 'default';
                 $resolvedType = $info['resolvedType'] ?? '';
-                $items[] = [
+                $documentation = "**Laravel Driver**: `{$name}`\n\n- Kind: `{$driverKind}`\n- Driver: `{$configured}`\n- Type: `{$resolvedType}`";
+                $data = [];
+
+                $source = $this->driverRegistry->sourceForDriver($driverKind, $name);
+                if ($source !== null && is_string($source['file'] ?? null)) {
+                    $path = $this->projectPath((string) $source['file']);
+                    $line = is_numeric($source['line'] ?? null) ? (int) $source['line'] : null;
+                    $target = $this->project->target($path, $line);
+
+                    $documentation .= "\n- Source: [{$path}]({$target})";
+                    $data['laravelSource'] = [
+                        'kind' => 'driver',
+                        'key'  => $source['key'],
+                        'path' => $path,
+                        'line' => $line,
+                    ];
+                }
+
+                $item = [
                     'label'            => $name,
                     'kind'             => 12,
                     'detail'           => "({$configured} driver) -> {$resolvedType}",
-                    'documentation'    => "**Laravel Driver**: `{$name}`\n\n- Kind: `{$driverKind}`\n- Driver: `{$configured}`\n- Type: `{$resolvedType}`",
+                    'documentation'    => $documentation,
                     'insertText'       => $name,
                     'textEdit'         => [
                         'range'   => $replacementRange,
                         'newText' => $name,
                     ],
                 ];
+
+                if ($data !== []) {
+                    $item['data'] = $data;
+                }
+
+                $items[] = $item;
             }
 
             return $items;
@@ -469,5 +439,19 @@ class AttributeCompletionProvider implements CompletionProvider
         }
 
         return [];
+    }
+
+    protected function projectPath(string $path): string
+    {
+        if ($this->isAbsolutePath($path)) {
+            return $this->project->uri()->relativePath($path);
+        }
+
+        return $path;
+    }
+
+    protected function isAbsolutePath(string $path): bool
+    {
+        return preg_match('#^(?:/|[A-Za-z]:[\\\\/])#', $path) === 1;
     }
 }

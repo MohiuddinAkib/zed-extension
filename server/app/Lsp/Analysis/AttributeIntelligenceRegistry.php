@@ -259,6 +259,84 @@ class AttributeIntelligenceRegistry
     }
 
     /**
+     * Get the completion/link domain for driver-backed Laravel helper arguments.
+     */
+    public function getHelperArgumentDomain(string $helper, int $argumentIndex = 0): ?string
+    {
+        if ($argumentIndex !== 0) {
+            return null;
+        }
+
+        return match (strtolower($helper)) {
+            'auth' => 'driver:auth_guards',
+            'cache' => 'driver:cache_stores',
+            'storage' => 'driver:filesystem_disks',
+            'db' => 'driver:database_connections',
+            default => null,
+        };
+    }
+
+    /**
+     * Get the completion/link domain for driver-backed Laravel facade method arguments.
+     */
+    public function getFacadeMethodArgumentDomain(string $facade, string $method, int $argumentIndex = 0): ?string
+    {
+        if ($argumentIndex !== 0) {
+            return null;
+        }
+
+        $shortFacade = class_basename(str_replace('/', '\\', ltrim($facade, '\\')));
+
+        return match ($shortFacade) {
+            'Auth' => match ($method) {
+                'guard', 'user' => 'driver:auth_guards',
+                default => null,
+            },
+            'Storage' => match ($method) {
+                'disk', 'fake', 'persistentFake', 'forgetDisk' => 'driver:filesystem_disks',
+                default => null,
+            },
+            'DB', 'Database' => match ($method) {
+                'connection' => 'driver:database_connections',
+                default => null,
+            },
+            'Cache' => match ($method) {
+                'store', 'driver' => 'driver:cache_stores',
+                default => null,
+            },
+            'Queue' => match ($method) {
+                'connection' => 'driver:queue_connections',
+                default => null,
+            },
+            'Mail' => match ($method) {
+                'mailer' => 'driver:mailers',
+                default => null,
+            },
+            'Broadcast' => match ($method) {
+                'connection' => 'driver:broadcasters',
+                default => null,
+            },
+            'Redis' => match ($method) {
+                'connection' => 'driver:redis_connections',
+                default => null,
+            },
+            'Log' => match ($method) {
+                'channel', 'driver' => 'driver:log_channels',
+                default => null,
+            },
+            'Route' => match ($method) {
+                'middleware' => 'middleware',
+                default => null,
+            },
+            'Gate' => match ($method) {
+                'allows', 'denies', 'check', 'authorize', 'inspect' => 'policies',
+                default => null,
+            },
+            default => null,
+        };
+    }
+
+    /**
      * Resolve the concrete or contract injected type for an attribute.
      */
     public function resolveInjectedType(string $name, ?string $argumentValue = null): ?string

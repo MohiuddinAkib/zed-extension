@@ -274,6 +274,45 @@ class DriverRegistry
     }
 
     /**
+     * Resolve the indexed config source for a configured driver, when available.
+     *
+     * @return array{key: string, file: string|null, line: int|null}|null
+     */
+    public function sourceForDriver(string $kind, string $driverName): ?array
+    {
+        $schema = self::DRIVER_CONFIGS[$kind] ?? null;
+        if ($schema === null) {
+            return null;
+        }
+
+        $cleanName = trim($driverName, '\'"');
+        if ($cleanName === '') {
+            return null;
+        }
+
+        $driver = $this->getDrivers($kind)[$cleanName] ?? null;
+        if (!is_array($driver)) {
+            return null;
+        }
+
+        $metadata = $driver['metadata'] ?? [];
+        if (!is_array($metadata)) {
+            return null;
+        }
+
+        $file = $metadata['file'] ?? null;
+        if (!is_string($file) || $file === '') {
+            return null;
+        }
+
+        return [
+            'key'  => (string) ($metadata['name'] ?? ($schema['prefix'] . $cleanName)),
+            'file' => $file,
+            'line' => is_numeric($metadata['line'] ?? null) ? (int) $metadata['line'] : null,
+        ];
+    }
+
+    /**
      * List all supported driver domain kinds.
      *
      * @return array<int, string>
