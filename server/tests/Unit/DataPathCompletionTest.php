@@ -2,6 +2,7 @@
 
 declare(strict_types=1);
 
+use App\Lsp\Analysis\BladeScopeResolver;
 use App\Lsp\Analysis\DataPathResolver;
 use App\Lsp\Document;
 use App\Lsp\DocumentManager;
@@ -353,6 +354,35 @@ PHP;
 
     $fluentValueType = $resolver->inferExpressionType("fluent(\$data)->get('user.id')", $doc, ['line' => 2, 'character' => 0]);
     expect($fluentValueType?->displayName)->toBe('int');
+
+    @rmdir($tempDir . '/resources/views');
+    @rmdir($tempDir);
+});
+
+test('Blade scope uses exact data path return types for local php variables', function () {
+    $tempDir = sys_get_temp_dir() . '/datapath_blade_scope_' . uniqid();
+    @mkdir($tempDir . '/resources/views', 0777, true);
+
+    $project = createDataPathTestProject($tempDir);
+    $resolver = new BladeScopeResolver($project);
+
+    $blade = <<<'BLADE'
+@use('App\Models\User')
+@php
+    $users = User::whereNotNull('id')->get();
+    $user = $users->first();
+    $address = fluent($user)->get('profile');
+    $addressFromDataGet = data_get($user, 'profile');
+@endphp
+
+{{ $address-> }}
+BLADE;
+
+    $doc = new Document('file://' . $tempDir . '/resources/views/test.blade.php', $blade);
+    $scope = $resolver->resolveAtPosition($doc, 8, 13);
+
+    expect($scope->variables['address']->type->displayName)->toBe('\\App\\Models\\Profile');
+    expect($scope->variables['addressFromDataGet']->type->displayName)->toBe('\\App\\Models\\Profile');
 
     @rmdir($tempDir . '/resources/views');
     @rmdir($tempDir);

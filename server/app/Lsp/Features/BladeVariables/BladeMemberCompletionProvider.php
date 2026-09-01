@@ -265,7 +265,7 @@ class BladeMemberCompletionProvider implements CompletionProvider
 
         $this->ensureAutoloaderRegistered();
 
-        $members = $this->resolveMembersForType($targetType);
+        $members = $this->resolveMembersForType($targetType, $varName);
 
         if (empty($members)) {
             return [];
@@ -391,7 +391,7 @@ class BladeMemberCompletionProvider implements CompletionProvider
      *
      * @return array<string, array<string, mixed>>
      */
-    protected function resolveMembersForType(string $type): array
+    protected function resolveMembersForType(string $type, string $varName = ''): array
     {
         if (str_contains($type, '|')) {
             $unionMembers = [];
@@ -400,7 +400,7 @@ class BladeMemberCompletionProvider implements CompletionProvider
                 if ($subType === '' || in_array($subType, ['mixed', 'null', 'void', 'never', 'false', 'true', 'string', 'int', 'float', 'bool', 'array'], true)) {
                     continue;
                 }
-                foreach ($this->resolveMembersForType($subType) as $k => $v) {
+                foreach ($this->resolveMembersForType($subType, $varName) as $k => $v) {
                     if (!isset($unionMembers[$k])) {
                         $unionMembers[$k] = $v;
                     }
@@ -411,6 +411,24 @@ class BladeMemberCompletionProvider implements CompletionProvider
             }
         }
 
+        if (str_contains($type, '&')) {
+            $intersectionMembers = [];
+            foreach (explode('&', $type) as $subType) {
+                $subType = trim($subType);
+                if ($subType === '' || in_array($subType, ['mixed', 'null', 'void', 'never', 'false', 'true'], true)) {
+                    continue;
+                }
+                foreach ($this->resolveMembersForType($subType, $varName) as $k => $v) {
+                    if (!isset($intersectionMembers[$k])) {
+                        $intersectionMembers[$k] = $v;
+                    }
+                }
+            }
+            if (!empty($intersectionMembers)) {
+                return $intersectionMembers;
+            }
+        }
+
         $members = [];
         $cleanType = ltrim(preg_replace('/\|null|\?/', '', $type), '\\');
         $baseClass = preg_replace('/<.*>$/', '', $cleanType);
@@ -418,7 +436,7 @@ class BladeMemberCompletionProvider implements CompletionProvider
 
 
         // 1. Loop variable: $loop->index, $loop->iteration, $loop->first, $loop->last, etc.
-        if ($cleanType === 'stdClass' || $cleanType === 'object' || $baseClass === 'stdClass' || $baseClass === 'object') {
+        if ($varName === 'loop' && ($cleanType === 'stdClass' || $cleanType === 'object' || $baseClass === 'stdClass' || $baseClass === 'object' || str_contains($cleanType, 'Loop'))) {
             $loopProps = [
                 'index'     => ['type' => 'int', 'doc' => 'The index of the current loop iteration (starts at 0).'],
                 'iteration' => ['type' => 'int', 'doc' => 'The current loop iteration (starts at 1).'],
@@ -1901,6 +1919,13 @@ class BladeMemberCompletionProvider implements CompletionProvider
             $parts = explode('|', $type);
 
             return implode('|', array_map(fn ($p) => $this->qualifyType(trim($p), $document), $parts));
+        }
+
+        // Intersection: stdClass&object{...}
+        if (str_contains($type, '&')) {
+            $parts = explode('&', $type);
+
+            return implode('&', array_map(fn ($p) => $this->qualifyType(trim($p), $document), $parts));
         }
 
         // Primitives: don't qualify

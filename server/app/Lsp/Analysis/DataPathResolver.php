@@ -80,8 +80,8 @@ class DataPathResolver
             return $keys;
         }
 
-        // 2. Union types
-        if ($typeRef->isUnion()) {
+        // 2. Union and Intersection types
+        if ($typeRef->isUnion() || $typeRef->kind === 'intersection') {
             foreach ($typeRef->children as $child) {
                 if ($child->nullable || ($child->kind === 'scalar' && $child->displayName === 'null')) {
                     continue;

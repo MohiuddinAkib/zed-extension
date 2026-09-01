@@ -475,7 +475,7 @@ class BladeAstAnalyzer
             $clean = preg_replace('/\s+\}/', '}', (string) $clean);
         }
 
-        return (string) $clean;
+        return TypeRef::unwrapOuterParens((string) $clean);
     }
 
     protected function parseInjectSymbol(string $rawArgs, ?string $source, int $line): ?VariableSymbol
@@ -546,6 +546,23 @@ class BladeAstAnalyzer
         }
 
         $localScope = [];
+        $exprStmts = $this->nodeFinder->find($stmts, fn (Node $node): bool => $node instanceof Expression && $node->expr instanceof Assign);
+        $stmtDocComments = [];
+        foreach ($exprStmts as $exprStmt) {
+            $doc = $exprStmt->getDocComment()?->getText();
+            if ($doc === null) {
+                foreach ($exprStmt->getComments() as $c) {
+                    if (str_contains($c->getText(), '@var')) {
+                        $doc = $c->getText();
+                        break;
+                    }
+                }
+            }
+            if ($doc !== null && $exprStmt->expr->var instanceof Variable && is_string($exprStmt->expr->var->name)) {
+                $stmtDocComments[$exprStmt->expr->var->name] = $doc;
+            }
+        }
+
         $assignments = $this->nodeFinder->find($stmts, fn (Node $node): bool => $node instanceof Assign);
 
         foreach ($assignments as $assignment) {
@@ -554,8 +571,9 @@ class BladeAstAnalyzer
             }
 
             $docType = null;
-            if ($docComment = $assignment->getDocComment()) {
-                $vars = $this->docBlockParser->extractVarTags($docComment->getText());
+            $docText = $stmtDocComments[$assignment->var->name] ?? $assignment->getDocComment()?->getText();
+            if ($docText !== null) {
+                $vars = $this->docBlockParser->extractVarTags($docText);
                 if (isset($vars[$assignment->var->name])) {
                     $docType = $this->cleanDocType($vars[$assignment->var->name]);
                 }
@@ -913,6 +931,24 @@ class BladeAstAnalyzer
 
             $parentType = $this->inferTypeFromExprNode($expr->var, $localScope, $importedUses);
 
+            if (str_contains($parentType, 'Fluent')) {
+                $resolver = new DataPathResolver(
+                    project: $this->project,
+                    bladeAnalyzer: $this,
+                    functionTypeResolver: $this->functionTypeResolver,
+                );
+                $type = $resolver->inferFluentMethodReturnType(
+                    TypeRef::fromString($parentType),
+                    $methodName,
+                    $this->argumentExpressions($expr->args),
+                    $this->documentForLocalScope($localScope),
+                );
+
+                if ((string) $type !== 'mixed') {
+                    return $type->displayName;
+                }
+            }
+
             // If calling method on Builder: $builder->get(), $builder->first(), $builder->where()
             if (EloquentBuilderRegistry::isBuilder($parentType)) {
                 $modelType = EloquentBuilderRegistry::extractModelFromBuilder($parentType) ?? 'mixed';
@@ -977,24 +1013,12 @@ class BladeAstAnalyzer
             if ($fnName === 'tap' && !empty($expr->args[0])) {
                 return $this->inferTypeFromExprNode($expr->args[0]->value, $localScope, $importedUses);
             }
-            if ($fnName === 'fluent' && !empty($expr->args[0])) {
-                $innerType = $this->inferTypeFromExprNode($expr->args[0]->value, $localScope, $importedUses);
-                return $innerType !== 'mixed' ? "\\Illuminate\\Support\\Fluent<{$innerType}>" : '\\Illuminate\\Support\\Fluent';
-            }
 
-            $firstArg = null;
-            if (!empty($expr->args[0])) {
-                if ($expr->args[0]->value instanceof String_) {
-                    $firstArg = $expr->args[0]->value->value;
-                } elseif ($expr->args[0]->value instanceof Node\Expr\ClassConstFetch && $expr->args[0]->value->class instanceof Name) {
-                    $firstArg = $expr->args[0]->value->class->toString();
-                } else {
-                    $firstArg = '$dynamic';
-                }
-            }
-
-            $argCount = count($expr->args);
-            $resolved = $this->functionTypeResolver->resolve($fnName, $firstArg, null, $argCount);
+            $resolved = $this->functionTypeResolver->resolveCall(
+                $fnName,
+                $this->argumentExpressions($expr->args),
+                $this->documentForLocalScope($localScope),
+            );
 
             return $resolved ?: 'mixed';
         }
@@ -1013,6 +1037,36 @@ class BladeAstAnalyzer
         }
 
         return substr($code, $start, $end - $start + 1);
+    }
+
+    /**
+     * @param  list<Arg>  $args
+     * @return list<string>
+     */
+    protected function argumentExpressions(array $args): array
+    {
+        $printer = new \PhpParser\PrettyPrinter\Standard();
+
+        return array_map(function (Arg $arg) use ($printer): string {
+            return $printer->prettyPrintExpr($arg->value);
+        }, $args);
+    }
+
+    /**
+     * @param  array<string, array{name?: string, type?: string}>  $localScope
+     */
+    protected function documentForLocalScope(array $localScope): \App\Lsp\Document
+    {
+        $docblocks = [];
+        foreach ($localScope as $name => $symbol) {
+            $type = (string) ($symbol['type'] ?? 'mixed');
+            if ($type === '' || $type === 'mixed') {
+                continue;
+            }
+            $docblocks[] = "/** @var {$type} \${$name} */";
+        }
+
+        return new \App\Lsp\Document('memory://blade-ast-local-scope.php', implode("\n", $docblocks));
     }
 
     protected function lineForPhpNode(string $code, Node $node, int $startLine): int

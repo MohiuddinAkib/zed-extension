@@ -32,6 +32,7 @@ final class TypeRef
 
         $nullable = str_starts_with($type, '?');
         $normalized = $nullable ? substr($type, 1) : $type;
+        $normalized = self::unwrapOuterParens($normalized);
 
         if ($normalized === 'mixed') {
             return new self('mixed', $type, $nullable);
@@ -152,6 +153,35 @@ final class TypeRef
     /**
      * @return list<string>
      */
+    public static function unwrapOuterParens(string $type): string
+    {
+        $type = trim($type);
+        while (str_starts_with($type, '(') && str_ends_with($type, ')')) {
+            $depth = 0;
+            $len = strlen($type);
+            $isEnclosing = true;
+            for ($i = 0; $i < $len - 1; $i++) {
+                $ch = $type[$i];
+                if ($ch === '(') {
+                    $depth++;
+                } elseif ($ch === ')') {
+                    $depth--;
+                    if ($depth === 0) {
+                        $isEnclosing = false;
+                        break;
+                    }
+                }
+            }
+            if ($isEnclosing) {
+                $type = trim(substr($type, 1, -1));
+            } else {
+                break;
+            }
+        }
+
+        return $type;
+    }
+
     protected static function splitTopLevel(string $value, string $separator): array
     {
         $parts = [];

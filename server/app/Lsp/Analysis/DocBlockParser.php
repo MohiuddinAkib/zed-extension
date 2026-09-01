@@ -11,6 +11,10 @@ use PHPStan\PhpDocParser\Ast\PhpDoc\PropertyTagValueNode;
 use PHPStan\PhpDocParser\Ast\PhpDoc\VarTagValueNode;
 use PHPStan\PhpDocParser\Ast\Type\ArrayShapeNode;
 use PHPStan\PhpDocParser\Ast\Type\GenericTypeNode;
+use PHPStan\PhpDocParser\Ast\Type\IntersectionTypeNode;
+use PHPStan\PhpDocParser\Ast\Type\NullableTypeNode;
+use PHPStan\PhpDocParser\Ast\Type\ObjectShapeNode;
+use PHPStan\PhpDocParser\Ast\Type\ParenthesizedTypeNode;
 use PHPStan\PhpDocParser\Ast\Type\TypeNode;
 use PHPStan\PhpDocParser\Ast\Type\UnionTypeNode;
 use PHPStan\PhpDocParser\Lexer\Lexer;
@@ -261,12 +265,12 @@ class DocBlockParser
      */
     protected function findArrayShapeKeysFromNode(TypeNode $node): array
     {
-        if ($node instanceof ArrayShapeNode) {
+        if ($node instanceof ArrayShapeNode || $node instanceof ObjectShapeNode) {
             $keys = [];
             foreach ($node->items as $item) {
                 $keyName = $item->keyName ? (string) $item->keyName : '';
                 // Strip quotes if key was defined as 'key' or "key"
-                $keyName = trim($keyName, '\'"');
+                $keyName = trim($keyName, "'\"");
                 $itemType = (string) $item->valueType;
 
                 if ($keyName !== '') {
@@ -280,7 +284,7 @@ class DocBlockParser
             return $keys;
         }
 
-        if ($node instanceof UnionTypeNode) {
+        if ($node instanceof UnionTypeNode || $node instanceof IntersectionTypeNode) {
             $keys = [];
             foreach ($node->types as $subType) {
                 $subKeys = $this->findArrayShapeKeysFromNode($subType);
@@ -289,6 +293,10 @@ class DocBlockParser
                 }
             }
             return $keys;
+        }
+
+        if ($node instanceof NullableTypeNode || $node instanceof ParenthesizedTypeNode) {
+            return $this->findArrayShapeKeysFromNode($node->type);
         }
 
         return [];

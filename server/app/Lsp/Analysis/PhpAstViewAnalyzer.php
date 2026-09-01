@@ -243,15 +243,62 @@ class PhpAstViewAnalyzer
                     }
                 }
 
+                if ($node instanceof Expr\Closure) {
+                    $this->currentScope = [];
+                    foreach ($node->params as $param) {
+                        if ($param->var instanceof Variable && is_string($param->var->name)) {
+                            $varName = $param->var->name;
+                            $type = $this->resolveTypeNode($param->type);
+                            $this->currentScope[$varName] = [
+                                'name' => $varName,
+                                'type' => $type,
+                                'origin' => 'Parameter (Closure)',
+                                'line' => $param->getStartLine(),
+                                'source' => $this->filePath,
+                            ];
+                        }
+                    }
+                }
+
                 // 3. Track variable assignments in local scope
-                if ($node instanceof Assign && $node->var instanceof Variable && is_string($node->var->name)) {
+                if ($node instanceof Node\Stmt\Expression && $node->expr instanceof Assign) {
+                    $assign = $node->expr;
+                    if ($assign->var instanceof Variable && is_string($assign->var->name)) {
+                        $varName = $assign->var->name;
+                        $docType = null;
+                        $docText = $node->getDocComment()?->getText();
+                        if ($docText === null) {
+                            foreach ($node->getComments() as $c) {
+                                if (str_contains($c->getText(), '@var')) {
+                                    $docText = $c->getText();
+                                    break;
+                                }
+                            }
+                        }
+                        if ($docText !== null) {
+                            if (preg_match('/@var\s+([\s\S]+?)(?:\s+\$' . preg_quote($varName, '/') . '|\s*\*\/|\s*$)/', $docText, $m)) {
+                                $docType = $this->cleanAndQualifyDocType($m[1]);
+                            }
+                        }
+                        $type = $docType ?: $this->inferTypeFromExpr($assign->expr);
+                        $this->currentScope[$varName] = [
+                            'name' => $varName,
+                            'type' => $type,
+                            'origin' => $docType ? 'PHPDoc' : ('Assignment' . ($this->currentMethod ? " in {$this->currentMethod}()" : '')),
+                            'line' => $node->getStartLine(),
+                            'source' => $this->filePath,
+                        ];
+                    }
+                } elseif ($node instanceof Assign && $node->var instanceof Variable && is_string($node->var->name)) {
                     $varName = $node->var->name;
-                    $type = $this->inferTypeFromExpr($node->expr);
-                    $this->currentScope[$varName] = [
-                        'name' => $varName,
-                        'type' => $type,
-                        'origin' => 'Assignment' . ($this->currentMethod ? " in {$this->currentMethod}()" : ''),
-                    ];
+                    if (!isset($this->currentScope[$varName])) {
+                        $type = $this->inferTypeFromExpr($node->expr);
+                        $this->currentScope[$varName] = [
+                            'name' => $varName,
+                            'type' => $type,
+                            'origin' => 'Assignment' . ($this->currentMethod ? " in {$this->currentMethod}()" : ''),
+                        ];
+                    }
                 }
 
                 // 4. Match class-based composer / creator methods: compose(View $view) / create(View $view)
@@ -293,7 +340,7 @@ class PhpAstViewAnalyzer
 
             public function leaveNode(Node $node)
             {
-                if ($node instanceof ClassMethod || $node instanceof Function_) {
+                if ($node instanceof ClassMethod || $node instanceof Function_ || $node instanceof Expr\Closure) {
                     $this->currentScope = [];
                     $this->currentMethod = null;
                 }
@@ -950,6 +997,41 @@ class PhpAstViewAnalyzer
                 return $parts;
             }
 
+            protected function splitTypeIntersection(string $type): array
+            {
+                $parts = [];
+                $current = '';
+                $depthBraces = 0;
+                $depthAngles = 0;
+                $depthParens = 0;
+                $len = strlen($type);
+
+                for ($i = 0; $i < $len; $i++) {
+                    $ch = $type[$i];
+                    if ($ch === '{') $depthBraces++;
+                    elseif ($ch === '}') $depthBraces = max(0, $depthBraces - 1);
+                    elseif ($ch === '<') $depthAngles++;
+                    elseif ($ch === '>') $depthAngles = max(0, $depthAngles - 1);
+                    elseif ($ch === '(') $depthParens++;
+                    elseif ($ch === ')') $depthParens = max(0, $depthParens - 1);
+
+                    if ($ch === '&' && $depthBraces === 0 && $depthAngles === 0 && $depthParens === 0) {
+                        if (trim($current) !== '') {
+                            $parts[] = trim($current);
+                        }
+                        $current = '';
+                    } else {
+                        $current .= $ch;
+                    }
+                }
+
+                if (trim($current) !== '') {
+                    $parts[] = trim($current);
+                }
+
+                return $parts;
+            }
+
             protected function qualifyDocType(string $type): string
             {
                 $type = trim($type);
@@ -957,14 +1039,21 @@ class PhpAstViewAnalyzer
                     return 'mixed';
                 }
 
-                // If array shape e.g. array{ip?: string, user_agent?: string}
-                if (str_starts_with($type, 'array{') || str_starts_with($type, '{')) {
+                // If array shape or object shape e.g. array{ip?: string} or object{name: string}
+                if (str_starts_with($type, 'array{') || str_starts_with($type, 'object{') || str_starts_with($type, '{')) {
                     $type = preg_replace('/\s+/', ' ', $type);
                     $type = preg_replace('/\s*:\s*/', ': ', $type);
                     $type = preg_replace('/\s*,\s*/', ', ', $type);
                     $type = preg_replace('/\{\s+/', '{', $type);
                     $type = preg_replace('/\s+\}/', '}', $type);
                     return $type;
+                }
+
+                // If intersection type e.g. stdClass&object{name: string}
+                $intersectionParts = $this->splitTypeIntersection($type);
+                if (count($intersectionParts) > 1) {
+                    $qualified = array_map(fn ($p) => $this->qualifyDocType($p), $intersectionParts);
+                    return implode('&', $qualified);
                 }
 
                 // If union type e.g. "staging"|"production" or array{...}|null

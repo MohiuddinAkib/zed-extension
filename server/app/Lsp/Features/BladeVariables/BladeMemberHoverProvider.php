@@ -427,7 +427,7 @@ class BladeMemberHoverProvider implements HoverProvider
         $baseClass = ltrim(preg_replace('/\[\]$/', '', $baseClass), '\\');
 
         // 1. Loop variable: $loop->index, $loop->iteration, $loop->first, $loop->last, etc.
-        if ($varName === 'loop' || $cleanType === 'stdClass' || $cleanType === 'object' || $baseClass === 'stdClass' || $baseClass === 'object') {
+        if ($varName === 'loop' && ($cleanType === 'stdClass' || $cleanType === 'object' || $baseClass === 'stdClass' || $baseClass === 'object' || str_contains($cleanType, 'Loop'))) {
             $loopProps = [
                 'index'     => ['type' => 'int', 'doc' => 'The index of the current loop iteration (starts at 0).'],
                 'iteration' => ['type' => 'int', 'doc' => 'The current loop iteration (starts at 1).'],
@@ -455,15 +455,15 @@ class BladeMemberHoverProvider implements HoverProvider
             }
         }
 
-        // 2. Array shape: array{ip: string, user_agent: string}
+        // 2. Array shape or Object shape: array{ip: string, user_agent: string} or object{name: string, age: int}
         $shapeKeys = $this->docBlockParser->extractArrayShapeKeys($cleanType);
         if (isset($shapeKeys[$memberName])) {
             $propType = $shapeKeys[$memberName]['type'];
 
             return [
-                'title'    => "\${$varName}['{$memberName}']",
+                'title'    => $isArrayAccess ? "\${$varName}['{$memberName}']" : "\${$varName}->{$memberName}",
                 'type'     => $propType,
-                'origin'   => 'Array Shape',
+                'origin'   => str_contains($cleanType, 'object{') ? 'Object Shape' : 'Array Shape',
                 'isMethod' => false,
                 'source'   => $varSource,
                 'line'     => $varLine,
