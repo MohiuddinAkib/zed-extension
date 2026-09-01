@@ -8,8 +8,11 @@ use App\Lsp\Document;
 use App\Lsp\DocumentManager;
 use App\Lsp\FeatureRegistry;
 use App\Lsp\Features\Attributes\AttributeCompletionProvider;
+use App\Lsp\Features\Attributes\AttributeHoverProvider;
+use App\Lsp\Features\Attributes\AttributeLinkProvider;
 use App\Lsp\Features\BladeVariables\BladeMemberCompletionProvider;
 use App\Lsp\Methods\TextDocumentCompletion;
+use App\Lsp\Methods\TextDocumentDocumentLink;
 use App\Lsp\Project;
 use App\Lsp\ProjectIndex;
 use App\Lsp\ScriptRunner;
@@ -41,6 +44,12 @@ function createUniversalAttributeTestProject(string $tempDir): Project
             ['name' => 'mail.mailers.smtp', 'file' => $tempDir . '/config/mail.php', 'line' => 10],
             ['name' => 'mail.mailers.ses', 'file' => $tempDir . '/config/mail.php', 'line' => 15],
             ['name' => 'mail.mailers.postmark', 'file' => $tempDir . '/config/mail.php', 'line' => 20],
+            ['name' => 'broadcasting.connections.pusher', 'file' => $tempDir . '/config/broadcasting.php', 'line' => 10],
+            ['name' => 'broadcasting.connections.reverb', 'file' => $tempDir . '/config/broadcasting.php', 'line' => 15],
+            ['name' => 'database.redis.default', 'file' => $tempDir . '/config/database.php', 'line' => 70],
+            ['name' => 'database.redis.cache', 'file' => $tempDir . '/config/database.php', 'line' => 80],
+            ['name' => 'logging.channels.stack', 'file' => $tempDir . '/config/logging.php', 'line' => 10],
+            ['name' => 'logging.channels.single', 'file' => $tempDir . '/config/logging.php', 'line' => 15],
             ['name' => 'app.name', 'value' => 'Laravel', 'file' => $tempDir . '/config/app.php', 'line' => 5],
             ['name' => 'app.env', 'value' => 'local', 'file' => $tempDir . '/config/app.php', 'line' => 6],
         ]),
@@ -52,13 +61,20 @@ function createUniversalAttributeTestProject(string $tempDir): Project
         ['key' => 'auth.login', 'path' => 'resources/views/auth/login.blade.php'],
     ]));
     $mockIndex->shouldReceive('routes')->andReturn(collect([
-        ['name' => 'home', 'uri' => '/', 'action' => 'HomeController@index'],
-        ['name' => 'login', 'uri' => '/login', 'action' => 'AuthController@login'],
+        ['name' => 'home', 'uri' => '/', 'action' => 'HomeController@index', 'filename' => 'routes/web.php', 'line' => 12],
+        ['name' => 'login', 'uri' => '/login', 'action' => 'AuthController@login', 'filename' => 'routes/web.php', 'line' => 18],
     ]));
     $mockIndex->shouldReceive('middleware')->andReturn(collect([
-        ['name' => 'auth', 'class' => 'App\Http\Middleware\Authenticate'],
-        ['name' => 'auth:sanctum', 'class' => 'Laravel\Sanctum\Http\Middleware\EnsureFrontendRequestsAreStateful'],
-        ['name' => 'guest', 'class' => 'App\Http\Middleware\RedirectIfAuthenticated'],
+        ['name' => 'auth', 'class' => 'App\Http\Middleware\Authenticate', 'path' => 'app/Http/Middleware/Authenticate.php', 'line' => 8],
+        ['name' => 'auth:sanctum', 'class' => 'Laravel\Sanctum\Http\Middleware\EnsureFrontendRequestsAreStateful', 'path' => 'vendor/laravel/sanctum/src/Http/Middleware/EnsureFrontendRequestsAreStateful.php', 'line' => 14],
+        ['name' => 'guest', 'class' => 'App\Http\Middleware\RedirectIfAuthenticated', 'path' => 'app/Http/Middleware/RedirectIfAuthenticated.php', 'line' => 8],
+    ]));
+    $mockIndex->shouldReceive('appBindings')->andReturn(collect([
+        'payment.gateway' => [
+            'class' => 'App\Services\PaymentGateway',
+            'path' => 'app/Providers/AppServiceProvider.php',
+            'line' => 33,
+        ],
     ]));
     $mockIndex->shouldReceive('auth')->andReturn([
         'policies' => [
@@ -69,6 +85,7 @@ function createUniversalAttributeTestProject(string $tempDir): Project
     $mockIndex->shouldReceive('models')->andReturn([
         'App\Models\Ticket' => [
             'class' => 'App\Models\Ticket',
+            'path' => 'app/Models/Ticket.php',
             'attributes' => [
                 ['name' => 'id', 'type' => 'int'],
                 ['name' => 'subject', 'type' => 'string'],
@@ -80,6 +97,7 @@ function createUniversalAttributeTestProject(string $tempDir): Project
         ],
         'App\Models\User' => [
             'class' => 'App\Models\User',
+            'path' => 'app/Models/User.php',
             'attributes' => [
                 ['name' => 'id', 'type' => 'int'],
                 ['name' => 'name', 'type' => 'string'],
@@ -197,6 +215,11 @@ test('AttributeCompletionProvider completes driver, config, route, view, and mid
     expect($labels2)->toContain('web');
     expect($labels2)->not->toContain('api');
 
+    $webItem = collect($items2)->firstWhere('label', 'web');
+    expect($webItem['documentation'])->toContain('[config/auth.php]');
+    expect($webItem['data']['laravelSource']['path'] ?? null)->toBe('config/auth.php');
+    expect($webItem['data']['laravelSource']['line'] ?? null)->toBe(10);
+
     // 3. #[Database('my|')]
     $code3 = "<?php #[Database('my')] class Repo {}";
     $doc3 = new Document('file://' . $tempDir . '/app/Repo.php', $code3);
@@ -220,6 +243,118 @@ test('AttributeCompletionProvider completes driver, config, route, view, and mid
     $items5 = $provider->get($doc5, ['line' => 0, 'character' => $char5]);
     $labels5 = array_column($items5, 'label');
     expect($labels5)->toContain('app.name', 'app.env');
+});
+
+test('AttributeLinkProvider links completed driver attribute and helper arguments to config sources', function () {
+    $tempDir = sys_get_temp_dir() . '/attr_driver_link_test_' . uniqid();
+    $project = createUniversalAttributeTestProject($tempDir);
+    $linkProvider = new AttributeLinkProvider($project);
+    $hoverProvider = new AttributeHoverProvider($project);
+
+    $code = <<<'PHP'
+<?php
+use Illuminate\Container\Attributes\CurrentUser;
+
+class Controller {
+    #[Log('stack')]
+    public mixed $logger;
+
+    public function show(#[CurrentUser('web')] $user): void
+    {
+        Auth::guard('api');
+        Storage::disk('s3');
+        DB::connection('mysql');
+        Cache::store('redis');
+        Queue::connection('database');
+        Mail::mailer('smtp');
+        Broadcast::connection('pusher');
+        Redis::connection('default');
+        Log::channel('stack');
+    }
+}
+PHP;
+
+    $doc = new Document('file://' . $tempDir . '/app/Http/Controllers/Controller.php', $code);
+    $links = $linkProvider->get($doc);
+    $targets = array_map(fn (array $link): string => (string) $link['target'], $links);
+
+    expect($targets)->toContain(
+        "file://{$tempDir}/config/auth.php#L10",
+        "file://{$tempDir}/config/auth.php#L15",
+        "file://{$tempDir}/config/filesystems.php#L20",
+        "file://{$tempDir}/config/database.php#L10",
+        "file://{$tempDir}/config/cache.php#L10",
+        "file://{$tempDir}/config/queue.php#L15",
+        "file://{$tempDir}/config/mail.php#L10",
+        "file://{$tempDir}/config/broadcasting.php#L10",
+        "file://{$tempDir}/config/database.php#L70",
+        "file://{$tempDir}/config/logging.php#L10",
+    );
+
+    $line = 7;
+    $character = strpos(explode("\n", $code)[$line], 'web') + 1;
+    $hover = $hoverProvider->get($doc, ['line' => $line, 'character' => $character]);
+
+    expect($hover['contents']['value'] ?? '')->toContain('Laravel Driver');
+    expect($hover['contents']['value'] ?? '')->toContain('auth.guards.web');
+    expect($hover['contents']['value'] ?? '')->toContain('[config/auth.php]');
+});
+
+test('protocol level documentLink exposes driver config links for attributes', function () {
+    $tempDir = sys_get_temp_dir() . '/attr_proto_link_test_' . uniqid();
+    $project = createUniversalAttributeTestProject($tempDir);
+
+    $docUri = 'file://' . $tempDir . '/app/Http/Controllers/Controller.php';
+    $docManager = new DocumentManager();
+    $docManager->open($docUri, "<?php class Controller { public function show(#[CurrentUser('web')] \$user): void {} }");
+
+    $container = new Container();
+    $container->instance(Project::class, $project);
+    $featureRegistry = new FeatureRegistry($container);
+    $featureRegistry->links = [AttributeLinkProvider::class];
+
+    $handler = new TextDocumentDocumentLink($docManager, $featureRegistry, $project);
+    $request = new JsonRpcRequest(1, 'textDocument/documentLink', [
+        'textDocument' => ['uri' => $docUri],
+    ]);
+
+    $targets = array_map(
+        fn (array $link): string => (string) $link['target'],
+        $handler->handle($request)->toArray()['result'] ?? [],
+    );
+
+    expect($targets)->toContain("file://{$tempDir}/config/auth.php#L10");
+});
+
+test('AttributeLinkProvider links supported attribute domains to their indexed sources', function () {
+    $tempDir = sys_get_temp_dir() . '/attr_domain_link_test_' . uniqid();
+    $project = createUniversalAttributeTestProject($tempDir);
+    $provider = new AttributeLinkProvider($project);
+
+    $code = <<<'PHP'
+<?php
+#[Config('app.name')]
+#[View('dashboard')]
+#[RedirectToRoute('home')]
+#[Middleware('auth')]
+#[Authorize('view')]
+#[Bind('payment.gateway')]
+#[UseEloquentModel('App\Models\Ticket')]
+class LinkedController {}
+PHP;
+
+    $doc = new Document('file://' . $tempDir . '/app/Http/Controllers/LinkedController.php', $code);
+    $targets = array_map(fn (array $link): string => (string) $link['target'], $provider->get($doc));
+
+    expect($targets)->toContain(
+        "file://{$tempDir}/config/app.php#L5",
+        "file://{$tempDir}/resources/views/dashboard.blade.php",
+        "file://{$tempDir}/routes/web.php#L12",
+        "file://{$tempDir}/app/Http/Middleware/Authenticate.php#L8",
+        "file://{$tempDir}/app/Policies/PostPolicy.php#L10",
+        "file://{$tempDir}/app/Providers/AppServiceProvider.php#L33",
+        "file://{$tempDir}/app/Models/Ticket.php",
+    );
 });
 
 test('AttributeCompletionProvider covers model and model attribute domains', function () {
@@ -284,6 +419,46 @@ test('Helper and facade driver completion suggests configured drivers', function
     $items5 = $provider->get($doc5, ['line' => 0, 'character' => $char5]);
     $labels5 = array_column($items5, 'label');
     expect($labels5)->toContain('redis');
+
+    // 6. Queue::connection('d|')
+    $code6 = "<?php Queue::connection('d');";
+    $doc6 = new Document('file://' . $tempDir . '/test.php', $code6);
+    $char6 = strrpos($code6, "'d") + strlen("'d");
+    $items6 = $provider->get($doc6, ['line' => 0, 'character' => $char6]);
+    $labels6 = array_column($items6, 'label');
+    expect($labels6)->toContain('database');
+
+    // 7. Mail::mailer('s|')
+    $code7 = "<?php Mail::mailer('s');";
+    $doc7 = new Document('file://' . $tempDir . '/test.php', $code7);
+    $char7 = strrpos($code7, "'s") + strlen("'s");
+    $items7 = $provider->get($doc7, ['line' => 0, 'character' => $char7]);
+    $labels7 = array_column($items7, 'label');
+    expect($labels7)->toContain('smtp', 'ses');
+
+    // 8. Broadcast::connection('p|')
+    $code8 = "<?php Broadcast::connection('p');";
+    $doc8 = new Document('file://' . $tempDir . '/test.php', $code8);
+    $char8 = strrpos($code8, "'p") + strlen("'p");
+    $items8 = $provider->get($doc8, ['line' => 0, 'character' => $char8]);
+    $labels8 = array_column($items8, 'label');
+    expect($labels8)->toContain('pusher');
+
+    // 9. Redis::connection('d|')
+    $code9 = "<?php Redis::connection('d');";
+    $doc9 = new Document('file://' . $tempDir . '/test.php', $code9);
+    $char9 = strrpos($code9, "'d") + strlen("'d");
+    $items9 = $provider->get($doc9, ['line' => 0, 'character' => $char9]);
+    $labels9 = array_column($items9, 'label');
+    expect($labels9)->toContain('default');
+
+    // 10. Log::channel('s|')
+    $code10 = "<?php Log::channel('s');";
+    $doc10 = new Document('file://' . $tempDir . '/test.php', $code10);
+    $char10 = strrpos($code10, "'s") + strlen("'s");
+    $items10 = $provider->get($doc10, ['line' => 0, 'character' => $char10]);
+    $labels10 = array_column($items10, 'label');
+    expect($labels10)->toContain('stack', 'single');
 });
 
 test('Chained member completion resolves concrete types after attributes, helpers, and facades', function () {

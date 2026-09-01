@@ -91,7 +91,33 @@ class TextDocumentDefinition implements Method
             $request->cancelIfRequested();
         }
 
-        return $links;
+        return $this->uniqueLinks($links);
+    }
+
+    /**
+     * @param  array<int, array<string, mixed>>  $links
+     * @return array<int, array<string, mixed>>
+     */
+    protected function uniqueLinks(array $links): array
+    {
+        $seen = [];
+        $unique = [];
+
+        foreach ($links as $link) {
+            $key = json_encode([
+                'range' => $link['range'] ?? null,
+                'target' => (string) ($link['target'] ?? ''),
+            ]);
+
+            if (!is_string($key) || isset($seen[$key])) {
+                continue;
+            }
+
+            $seen[$key] = true;
+            $unique[] = $link;
+        }
+
+        return $unique;
     }
 
     /**
