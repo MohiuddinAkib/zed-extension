@@ -84,7 +84,9 @@ final class Initialize implements Method
                 'signatureHelpProvider' => [
                     'triggerCharacters' => ['(', ','],
                 ],
-                'renameProvider'     => false,
+                'renameProvider'     => [
+                    'prepareProvider' => true,
+                ],
             ],
             'serverInfo' => [
                 'name'    => 'Laravel LSP (Akib Blade Intelligence)',

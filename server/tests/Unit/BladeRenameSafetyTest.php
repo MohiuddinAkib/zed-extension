@@ -59,3 +59,32 @@ BLADE;
     $invalidRename = $provider->rename($doc, ['line' => 1, 'character' => 18], '123-bad-var');
     expect($invalidRename)->toBeNull();
 });
+
+test('initialize response advertises renameProvider with prepareProvider', function () {
+    $container = $this->app;
+    $container->singletonIf(\App\Lsp\Contracts\ExceptionHandler::class, \App\Lsp\Exceptions\Handler::class);
+    $logger = Mockery::mock(\Psr\Log\LoggerInterface::class)->shouldIgnoreMissing();
+    $init = new \App\Lsp\Methods\Initialize($container, $logger);
+
+    $tempDir = sys_get_temp_dir() . '/init_rename_' . uniqid();
+    @mkdir($tempDir, 0777, true);
+    touch($tempDir . '/artisan');
+
+    $request = \App\Lsp\Transport\JsonRpcRequest::from([
+        'jsonrpc' => '2.0',
+        'id' => 1,
+        'method' => 'initialize',
+        'params' => [
+            'rootUri' => 'file://' . $tempDir,
+            'capabilities' => [],
+        ],
+    ]);
+
+    $response = $init->handle($request);
+    $result = $response->toArray()['result'] ?? [];
+
+    expect($result['capabilities'])->toHaveKey('renameProvider');
+    expect($result['capabilities']['renameProvider'])->toBe(['prepareProvider' => true]);
+
+    @rmdir($tempDir);
+});
