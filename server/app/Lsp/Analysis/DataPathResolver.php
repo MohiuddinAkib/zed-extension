@@ -32,12 +32,32 @@ class DataPathResolver
         protected ?BladeAstAnalyzer $bladeAnalyzer = null,
         protected ?FunctionTypeResolver $functionTypeResolver = null,
         protected ?SemanticIndex $semanticIndex = null,
+        protected ?MacroRegistry $macroRegistry = null,
     ) {
         $this->docBlockParser ??= new DocBlockParser();
-        $this->functionTypeResolver ??= new FunctionTypeResolver($this->project);
-        $this->bladeAnalyzer ??= new BladeAstAnalyzer($this->project, $this->functionTypeResolver);
+        $this->macroRegistry ??= $this->resolveMacroRegistry();
+        $this->functionTypeResolver ??= new FunctionTypeResolver($this->project, macroRegistry: $this->macroRegistry);
+        $this->bladeAnalyzer ??= new BladeAstAnalyzer($this->project, $this->functionTypeResolver, macroRegistry: $this->macroRegistry);
         $this->scopeResolver ??= $this->project !== null ? new BladeScopeResolver($this->project, $this->bladeAnalyzer) : null;
         $this->semanticIndex ??= $this->resolveSemanticIndex();
+    }
+
+    protected function resolveMacroRegistry(): ?MacroRegistry
+    {
+        if ($this->project === null) {
+            return null;
+        }
+
+        try {
+            $container = Container::getInstance();
+            if ($container->bound(MacroRegistry::class)) {
+                return $container->make(MacroRegistry::class);
+            }
+
+            return new MacroRegistry($this->project);
+        } catch (Throwable) {
+            return null;
+        }
     }
 
     protected function resolveSemanticIndex(): ?SemanticIndex
@@ -201,6 +221,20 @@ class DataPathResolver
                     }
                 }
             } catch (Throwable) {
+            }
+        }
+
+        // Macro methods from MacroRegistry
+        if ($this->macroRegistry !== null) {
+            $macros = $this->macroRegistry->getMacrosForClass($cleanClass);
+            foreach ($macros as $mName => $macro) {
+                if (!isset($keys[$mName])) {
+                    $keys[$mName] = [
+                        'name'       => $mName,
+                        'type'       => $macro->returnType ?? TypeRef::mixed(),
+                        'isOptional' => false,
+                    ];
+                }
             }
         }
 

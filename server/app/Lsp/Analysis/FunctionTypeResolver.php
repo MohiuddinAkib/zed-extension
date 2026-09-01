@@ -6,10 +6,13 @@ namespace App\Lsp\Analysis;
 
 use App\Lsp\Document;
 use App\Lsp\Features\AppBindings\AppBindingContainerTypeMap;
+use App\Lsp\Features\Facades\FacadeMap;
 use App\Lsp\Features\Functions\GlobalFunctionRegistry;
 use App\Lsp\Project;
+use App\Lsp\Semantics\MacroSymbol;
 use App\Lsp\Semantics\VirtualDocument;
 use Illuminate\Container\Container;
+use ReflectionClass;
 use ReflectionFunction;
 use ReflectionNamedType;
 use ReflectionUnionType;
@@ -25,6 +28,8 @@ class FunctionTypeResolver
 
     protected DriverRegistry $driverRegistry;
 
+    protected ?MacroRegistry $macroRegistry = null;
+
     /**
      * @var array<string, string|null>
      */
@@ -36,11 +41,29 @@ class FunctionTypeResolver
         ?DocBlockParser $docBlockParser = null,
         ?SemanticIndex $semanticIndex = null,
         ?DriverRegistry $driverRegistry = null,
+        ?MacroRegistry $macroRegistry = null,
     ) {
         $this->functionRegistry = $functionRegistry ?? new GlobalFunctionRegistry($this->project);
         $this->docBlockParser = $docBlockParser ?? new DocBlockParser();
         $this->semanticIndex = $semanticIndex ?? $this->resolveSemanticIndex();
         $this->driverRegistry = $driverRegistry ?? new DriverRegistry($project);
+        $this->macroRegistry = $macroRegistry ?? $this->resolveMacroRegistry();
+    }
+
+    protected function resolveMacroRegistry(): MacroRegistry
+    {
+        $container = Container::getInstance();
+
+        if ($container->bound(MacroRegistry::class)) {
+            return $container->make(MacroRegistry::class);
+        }
+
+        return new MacroRegistry($this->project);
+    }
+
+    public function macroRegistry(): MacroRegistry
+    {
+        return $this->macroRegistry ??= $this->resolveMacroRegistry();
     }
 
     protected function resolveSemanticIndex(): ?SemanticIndex
@@ -388,5 +411,90 @@ class FunctionTypeResolver
 
         // If multiple classes remain, return the first candidate or union
         return count($candidates) === 1 ? $candidates[0] : implode('|', $candidates);
+    }
+
+    /**
+     * Resolve a macro for a given class or facade.
+     */
+    public function resolveMacro(string $class, string $methodName): ?MacroSymbol
+    {
+        $cleanClass = ltrim($class, '\\');
+
+        if ($this->macroRegistry !== null) {
+            $macro = $this->macroRegistry->getMacro($cleanClass, $methodName);
+            if ($macro !== null) {
+                return $macro;
+            }
+
+            if (FacadeMap::isFacadeOrAlias($cleanClass)) {
+                $facadeTarget = FacadeMap::resolve($cleanClass);
+                if ($facadeTarget) {
+                    $macro = $this->macroRegistry->getMacro($facadeTarget, $methodName);
+                    if ($macro !== null) {
+                        return $macro;
+                    }
+                }
+
+                $accessor = FacadeMap::resolveAccessor($cleanClass);
+                if ($accessor) {
+                    $macro = $this->macroRegistry->getMacro($accessor, $methodName);
+                    if ($macro !== null) {
+                        return $macro;
+                    }
+                }
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * Resolve the return type of a method call or macro on a class or facade.
+     */
+    public function resolveMethodReturnType(string $class, string $methodName): ?string
+    {
+        $cleanClass = ltrim($class, '\\');
+
+        // 1. Check MacroRegistry
+        $macro = $this->resolveMacro($cleanClass, $methodName);
+        if ($macro !== null && $macro->returnType !== null && $macro->returnType->displayName !== 'mixed') {
+            return $macro->returnType->displayName;
+        }
+
+        // 2. Reflection and DocBlock resolution if class/interface exists
+        if (class_exists($cleanClass) || interface_exists($cleanClass)) {
+            try {
+                $ref = new ReflectionClass($cleanClass);
+                if ($ref->hasMethod($methodName)) {
+                    $m = $ref->getMethod($methodName);
+                    if ($m->hasReturnType()) {
+                        $retType = $m->getReturnType();
+                        if ($retType instanceof ReflectionNamedType) {
+                            $tName = $retType->getName();
+                            if (!$retType->isBuiltin() && !in_array($tName, ['self', 'parent', 'static', 'mixed', 'void', 'null'], true)) {
+                                return '\\' . ltrim($tName, '\\');
+                            }
+                            if ($tName === 'static' || $tName === 'self') {
+                                return '\\' . $cleanClass;
+                            }
+                            return $tName;
+                        } elseif ($retType instanceof ReflectionUnionType) {
+                            $unionTypes = array_map(fn ($t) => $t instanceof ReflectionNamedType && !$t->isBuiltin() ? ('\\' . ltrim($t->getName(), '\\')) : (string) $t, $retType->getTypes());
+                            return implode('|', $unionTypes);
+                        }
+                    }
+                }
+
+                if ($doc = $ref->getDocComment()) {
+                    $methods = $this->docBlockParser->extractMethods($doc);
+                    if (isset($methods[$methodName]['returnType'])) {
+                        return $methods[$methodName]['returnType'];
+                    }
+                }
+            } catch (Throwable) {
+            }
+        }
+
+        return null;
     }
 }

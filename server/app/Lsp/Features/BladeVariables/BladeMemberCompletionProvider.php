@@ -76,9 +76,9 @@ class BladeMemberCompletionProvider implements CompletionProvider
         ?MacroRegistry $macroRegistry = null,
     ) {
         $this->semanticIndex = $semanticIndex ?? $this->resolveSemanticIndex();
-        $this->functionTypeResolver = $functionTypeResolver ?? new FunctionTypeResolver($this->project, semanticIndex: $this->semanticIndex);
         $this->macroRegistry = $macroRegistry ?? $this->resolveMacroRegistry();
-        $this->bladeAnalyzer = new BladeAstAnalyzer($this->project, $this->functionTypeResolver);
+        $this->functionTypeResolver = $functionTypeResolver ?? new FunctionTypeResolver($this->project, semanticIndex: $this->semanticIndex, macroRegistry: $this->macroRegistry);
+        $this->bladeAnalyzer = new BladeAstAnalyzer($this->project, $this->functionTypeResolver, macroRegistry: $this->macroRegistry);
         $this->scopeResolver = new BladeScopeResolver($this->project, $this->bladeAnalyzer);
         $this->docBlockParser = new DocBlockParser;
     }
@@ -232,7 +232,7 @@ class BladeMemberCompletionProvider implements CompletionProvider
             }
         }
         // 6. Global helper: config()->, auth('web')->, fluent($data)->, etc.
-        elseif (preg_match('/(?:\b|\()([a-zA-Z_\x7f-\xff][a-zA-Z0-9_\x7f-\xff]*)\s*\(([^()]*)\)((?:(?:->|\?->)[a-zA-Z0-9_]+(?:\([^()]*\))?)*)(?:->|\?->)([a-zA-Z0-9_]*)$/', $text, $matches)) {
+        elseif (preg_match('/(?<!->|\?->|::|\$)\b([a-zA-Z_\x7f-\xff][a-zA-Z0-9_\x7f-\xff]*)\s*\(([^()]*)\)((?:(?:->|\?->)[a-zA-Z0-9_]+(?:\([^()]*\))?)*)(?:->|\?->)([a-zA-Z0-9_]*)$/', $text, $matches)) {
             $funcName = $matches[1];
             $rawArgs = $matches[2];
             $chain = $matches[3];
@@ -1054,12 +1054,15 @@ class BladeMemberCompletionProvider implements CompletionProvider
 
                 $members = $this->resolveMembersForType($currentType);
                 if (isset($members[$member])) {
-                    $detail = $members[$member]['detail'] ?? '';
-                    $ret = '';
-                    if (str_contains($detail, '): ')) {
-                        $ret = trim(explode('): ', $detail)[1]);
-                    } elseif ($detail !== '') {
-                        $ret = $detail;
+                    $ret = $members[$member]['returnType'] ?? '';
+                    if ($ret === '') {
+                        $detail = $members[$member]['detail'] ?? '';
+                        if (str_contains($detail, '): ')) {
+                            $ret = trim(explode('): ', $detail)[1]);
+                            $ret = preg_replace('/\s*\(macro\)$/', '', $ret);
+                        } elseif ($detail !== '') {
+                            $ret = $detail;
+                        }
                     }
 
                     $cleanRet = ltrim(preg_replace('/\|null|\?/', '', $ret), '\\');
@@ -1942,6 +1945,25 @@ class BladeMemberCompletionProvider implements CompletionProvider
     public function resolveMethodReturnType(string $class, string $methodName): string
     {
         $cleanClass = ltrim($class, '\\');
+
+        if ($this->macroRegistry !== null) {
+            $macro = $this->macroRegistry->getMacro($cleanClass, $methodName);
+            if ($macro === null && FacadeMap::isFacadeOrAlias($cleanClass)) {
+                $facadeTarget = FacadeMap::resolve($cleanClass);
+                $accessor = FacadeMap::resolveAccessor($cleanClass);
+                if ($facadeTarget) {
+                    $macro = $this->macroRegistry->getMacro($facadeTarget, $methodName);
+                }
+                if ($macro === null && $accessor) {
+                    $macro = $this->macroRegistry->getMacro($accessor, $methodName);
+                }
+            }
+
+            if ($macro !== null && $macro->returnType !== null && $macro->returnType->displayName !== 'mixed') {
+                return $macro->returnType->displayName;
+            }
+        }
+
         if (!class_exists($cleanClass) && !interface_exists($cleanClass)) {
             return 'mixed';
         }

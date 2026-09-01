@@ -256,12 +256,19 @@ class FeatureRegistry
             });
         }
 
+        if (!$this->container->bound(MacroRegistry::class)) {
+            $this->container->singleton(MacroRegistry::class, function () {
+                return new MacroRegistry($this->container->make(Project::class));
+            });
+        }
+
         if (!$this->container->bound(FunctionTypeResolver::class)) {
             $this->container->singleton(FunctionTypeResolver::class, function () {
                 $project = $this->container->bound(Project::class) ? $this->container->make(Project::class) : null;
                 $semanticIndex = $this->container->bound(SemanticIndex::class) ? $this->container->make(SemanticIndex::class) : null;
+                $macroRegistry = $this->container->bound(MacroRegistry::class) ? $this->container->make(MacroRegistry::class) : null;
 
-                return new FunctionTypeResolver($project, semanticIndex: $semanticIndex);
+                return new FunctionTypeResolver($project, semanticIndex: $semanticIndex, macroRegistry: $macroRegistry);
             });
         }
 
@@ -269,14 +276,9 @@ class FeatureRegistry
             $this->container->singleton(BladeAstAnalyzer::class, function () {
                 $project = $this->container->bound(Project::class) ? $this->container->make(Project::class) : null;
                 $resolver = $this->container->bound(FunctionTypeResolver::class) ? $this->container->make(FunctionTypeResolver::class) : null;
+                $macroRegistry = $this->container->bound(MacroRegistry::class) ? $this->container->make(MacroRegistry::class) : null;
 
-                return new BladeAstAnalyzer($project, $resolver);
-            });
-        }
-
-        if (!$this->container->bound(MacroRegistry::class)) {
-            $this->container->singleton(MacroRegistry::class, function () {
-                return new MacroRegistry($this->container->make(Project::class));
+                return new BladeAstAnalyzer($project, $resolver, macroRegistry: $macroRegistry);
             });
         }
     }

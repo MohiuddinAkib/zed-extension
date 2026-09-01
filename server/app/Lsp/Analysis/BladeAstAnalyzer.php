@@ -45,15 +45,29 @@ class BladeAstAnalyzer
     protected NodeFinder $nodeFinder;
     protected DocBlockParser $docBlockParser;
     protected FunctionTypeResolver $functionTypeResolver;
+    protected ?MacroRegistry $macroRegistry = null;
 
     public function __construct(
         protected ?Project $project = null,
         ?FunctionTypeResolver $functionTypeResolver = null,
+        ?MacroRegistry $macroRegistry = null,
     ) {
         $this->phpParser = (new ParserFactory())->createForNewestSupportedVersion();
         $this->nodeFinder = new NodeFinder();
         $this->docBlockParser = new DocBlockParser();
         $this->functionTypeResolver = $functionTypeResolver ?? $this->resolveFunctionTypeResolver();
+        $this->macroRegistry = $macroRegistry ?? $this->resolveMacroRegistry();
+    }
+
+    protected function resolveMacroRegistry(): MacroRegistry
+    {
+        $container = Container::getInstance();
+
+        if ($container->bound(MacroRegistry::class)) {
+            return $container->make(MacroRegistry::class);
+        }
+
+        return new MacroRegistry($this->project);
     }
 
     protected function resolveFunctionTypeResolver(): FunctionTypeResolver
@@ -633,7 +647,7 @@ class BladeAstAnalyzer
             );
 
             foreach ($phpSnippets as $block) {
-                $code = (string) $block->content;
+                $code = (string) ($block->innerContent ?? $block->content);
                 $baseLine = $block->position ? $block->position->startLine : 1;
                 if (preg_match_all('/\/\*\*[\s\S]*?\*\//', $code, $docMatches, PREG_OFFSET_CAPTURE)) {
                     foreach ($docMatches[0] as $docMatch) {
@@ -851,6 +865,12 @@ class BladeAstAnalyzer
             if (in_array($methodName, ['pluck'], true)) {
                 return '\\Illuminate\\Support\\Collection';
             }
+
+            $resolved = $this->functionTypeResolver->resolveMethodReturnType($className, $methodName);
+            if ($resolved !== null && $resolved !== 'mixed') {
+                return $resolved;
+            }
+
             return $className;
         }
 
@@ -1005,6 +1025,13 @@ class BladeAstAnalyzer
                     return "\\Illuminate\\Pagination\\LengthAwarePaginator<int, {$m[1]}>";
                 }
                 return '\\Illuminate\\Pagination\\LengthAwarePaginator';
+            }
+
+            if ($parentType !== 'mixed') {
+                $resolved = $this->functionTypeResolver->resolveMethodReturnType($parentType, $methodName);
+                if ($resolved !== null && $resolved !== 'mixed') {
+                    return $resolved;
+                }
             }
         }
 
